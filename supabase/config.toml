@@ -1,0 +1,22 @@
+project_id = "0ec90b57d6e95fcbda19832f"
+
+[functions.dingconnect-sync]
+verify_jwt = true
+
+[functions.lookup-operator]
+verify_jwt = false
+
+[functions.create-order]
+verify_jwt = false
+
+[functions.order-status]
+verify_jwt = false
+
+[functions.stripe-webhook]
+verify_jwt = false
+
+[functions.mercado-pago-webhook]
+verify_jwt = false
+
+[functions.create-checkout]
+verify_jwt = false
