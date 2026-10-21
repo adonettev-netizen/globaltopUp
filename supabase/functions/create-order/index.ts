@@ -181,16 +181,19 @@ Deno.serve(async (req: Request) => {
 
     // Determine payment provider — client can request a specific one,
     // otherwise default based on currency/market
-    const currency = (payment_currency || "USD").toUpperCase();
+    const requestedCurrency = (payment_currency || "USD").toUpperCase();
     const validProviders = ["stripe", "mercado_pago"];
     let provider: "stripe" | "mercado_pago";
     if (requestedProvider && validProviders.includes(requestedProvider)) {
       provider = requestedProvider as "stripe" | "mercado_pago";
-    } else if (currency === "BRL") {
+    } else if (requestedCurrency === "BRL") {
       provider = "mercado_pago";
     } else {
       provider = "stripe";
     }
+
+    // Mercado Pago only supports BRL — always compute in BRL when that provider is selected
+    const currency = provider === "mercado_pago" ? "BRL" : requestedCurrency;
 
     // Compute customer price server-side (never trust frontend amounts)
     const { data: priceData, error: priceErr } = await supabase.rpc("compute_customer_price", {

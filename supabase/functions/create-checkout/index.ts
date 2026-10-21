@@ -110,7 +110,7 @@ Deno.serve(async (req: Request) => {
             title: `Recarga: ${productName}`,
             quantity: 1,
             unit_price: amount,
-            currency_id: currency === "BRL" ? "BRL" : "USD",
+            currency_id: "BRL",
           }],
           external_reference: orderRef,
           back_urls: {
