@@ -1,10 +1,10 @@
 import { useState, useEffect, useCallback } from 'react';
-import { RefreshCw, Loader2, Database, TrendingUp, AlertCircle, CheckCircle2, Globe, Smartphone, DollarSign, Activity } from 'lucide-react';
+import { RefreshCw, Loader2, Database, TrendingUp, AlertCircle, CheckCircle2, Globe, Smartphone, DollarSign, Activity, Stethoscope, Wifi, Server, Search } from 'lucide-react';
 import { supabase, callEdgeFunction } from '@/lib/supabase';
 import { StatusBadge } from '@/components/StatusBadge';
 
 export function AdminPage() {
-  const [activeTab, setActiveTab] = useState<'overview' | 'orders' | 'sync' | 'config'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'orders' | 'sync' | 'diagnostics' | 'config'>('overview');
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<any>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
@@ -130,6 +130,7 @@ export function AdminPage() {
             { key: 'overview', label: 'Overview', icon: TrendingUp },
             { key: 'orders', label: 'Orders', icon: Activity },
             { key: 'sync', label: 'Catalog Sync', icon: Database },
+            { key: 'diagnostics', label: 'Diagnostics', icon: Stethoscope },
             { key: 'config', label: 'Pricing Config', icon: DollarSign },
           ].map((tab) => (
             <button
@@ -304,6 +305,16 @@ export function AdminPage() {
           </div>
         )}
 
+        {/* Diagnostics */}
+        {activeTab === 'diagnostics' && (
+          <DiagnosticsTab
+            stats={stats}
+            syncLogs={syncLogs}
+            onSync={handleSync}
+            syncing={syncing}
+          />
+        )}
+
         {/* Config */}
         {activeTab === 'config' && (
           <div className="space-y-6 animate-fade-in">
@@ -349,6 +360,188 @@ export function AdminPage() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function DiagnosticsTab({ stats, syncLogs, onSync, syncing }: {
+  stats: { countries: number; operators: number; products: number; orders: number };
+  syncLogs: any[];
+  onSync: (entity: string) => void;
+  syncing: boolean;
+}) {
+  const [diagPhone, setDiagPhone] = useState('');
+  const [diagResult, setDiagResult] = useState<any>(null);
+  const [diagLoading, setDiagLoading] = useState(false);
+  const [diagError, setDiagError] = useState<string | null>(null);
+
+  const lastSync = syncLogs[0];
+  const lastSuccess = syncLogs.find((l: any) => l.status === 'success');
+  const lastError = syncLogs.find((l: any) => l.status === 'failed');
+
+  const runDiagLookup = async () => {
+    if (!diagPhone.trim()) return;
+    setDiagLoading(true);
+    setDiagError(null);
+    setDiagResult(null);
+    const { data, error } = await callEdgeFunction('lookup-operator', {
+      method: 'GET',
+      params: { phone: diagPhone },
+    });
+    setDiagLoading(false);
+    if (error) {
+      setDiagError(error);
+    } else {
+      setDiagResult(data);
+    }
+  };
+
+  return (
+    <div className="space-y-6 animate-fade-in">
+      {/* Connection status */}
+      <div className="bg-white rounded-2xl border border-gray-100 p-6">
+        <div className="flex items-center gap-2 mb-4">
+          <Wifi className="w-5 h-5 text-brand-600" />
+          <h3 className="font-semibold text-gray-900">DingConnect Connection</h3>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <DiagStat label="Countries" value={stats.countries} ok={stats.countries > 0} />
+          <DiagStat label="Operators" value={stats.operators} ok={stats.operators > 0} />
+          <DiagStat label="Products" value={stats.products} ok={stats.products > 0} />
+        </div>
+      </div>
+
+      {/* Sync status */}
+      <div className="bg-white rounded-2xl border border-gray-100 p-6">
+        <div className="flex items-center gap-2 mb-4">
+          <Server className="w-5 h-5 text-brand-600" />
+          <h3 className="font-semibold text-gray-900">Synchronization Status</h3>
+        </div>
+        <div className="space-y-3">
+          {lastSuccess && (
+            <div className="flex items-center justify-between p-3 bg-accent-50 rounded-lg">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-accent-600" />
+                <span className="text-sm text-gray-700">Last successful sync</span>
+              </div>
+              <div className="text-right">
+                <p className="text-sm font-medium text-gray-900 capitalize">{lastSuccess.entity_type}</p>
+                <p className="text-xs text-gray-500">
+                  {lastSuccess.records_processed} records · {new Date(lastSuccess.completed_at).toLocaleString()}
+                </p>
+              </div>
+            </div>
+          )}
+          {lastError && (
+            <div className="flex items-center justify-between p-3 bg-red-50 rounded-lg">
+              <div className="flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-red-600" />
+                <span className="text-sm text-gray-700">Last error</span>
+              </div>
+              <div className="text-right max-w-md">
+                <p className="text-xs font-medium text-red-700">{lastError.error_message}</p>
+                <p className="text-xs text-gray-500 mt-0.5">{new Date(lastError.started_at).toLocaleString()}</p>
+              </div>
+            </div>
+          )}
+          {!lastSync && (
+            <p className="text-sm text-gray-500">No sync runs yet. Use the Catalog Sync tab to run one.</p>
+          )}
+        </div>
+        <button
+          onClick={() => onSync('full')}
+          disabled={syncing}
+          className="mt-4 px-4 py-2 rounded-xl bg-brand-600 text-white font-medium text-sm hover:bg-brand-700 disabled:opacity-50 flex items-center gap-2"
+        >
+          {syncing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+          Retry full sync
+        </button>
+      </div>
+
+      {/* Lookup test */}
+      <div className="bg-white rounded-2xl border border-gray-100 p-6">
+        <div className="flex items-center gap-2 mb-4">
+          <Search className="w-5 h-5 text-brand-600" />
+          <h3 className="font-semibold text-gray-900">Lookup Test</h3>
+        </div>
+        <p className="text-sm text-gray-600 mb-3">
+          Test country and operator detection for a phone number.
+        </p>
+        <div className="flex gap-3">
+          <input
+            type="tel"
+            value={diagPhone}
+            onChange={(e) => setDiagPhone(e.target.value)}
+            placeholder="e.g. +509 3701 1234"
+            className="flex-1 px-4 py-2.5 rounded-xl border border-gray-200 text-sm outline-none focus:border-brand-400"
+          />
+          <button
+            onClick={runDiagLookup}
+            disabled={diagLoading || !diagPhone.trim()}
+            className="px-5 py-2.5 rounded-xl bg-brand-600 text-white font-medium text-sm hover:bg-brand-700 disabled:opacity-50 flex items-center gap-2"
+          >
+            {diagLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+            Test
+          </button>
+        </div>
+
+        {diagError && (
+          <div className="mt-4 p-3 bg-red-50 rounded-lg border border-red-100">
+            <p className="text-sm text-red-800">{diagError}</p>
+          </div>
+        )}
+
+        {diagResult && (
+          <div className="mt-4 space-y-3">
+            <div className="p-3 bg-gray-50 rounded-lg">
+              <p className="text-xs text-gray-500 mb-1">Country detection</p>
+              <p className="text-sm font-medium text-gray-900">
+                {diagResult.detected
+                  ? `${diagResult.country?.flag} ${diagResult.country?.name} (+${diagResult.country?.calling_code})`
+                  : 'Not detected'}
+              </p>
+            </div>
+            <div className="p-3 bg-gray-50 rounded-lg">
+              <p className="text-xs text-gray-500 mb-1">Operator detection</p>
+              <p className="text-sm font-medium text-gray-900">
+                {diagResult.detected_operator
+                  ? `${diagResult.detected_operator.name} (method: ${diagResult.operator_detection_method})`
+                  : 'Not auto-detected — manual selection required'}
+              </p>
+            </div>
+            <div className="p-3 bg-gray-50 rounded-lg">
+              <p className="text-xs text-gray-500 mb-1">Available operators ({diagResult.operators?.length || 0})</p>
+              <div className="flex flex-wrap gap-1.5 mt-1">
+                {diagResult.operators?.map((op: any) => (
+                  <span key={op.id} className="text-xs px-2 py-1 bg-white rounded border border-gray-200 text-gray-700">
+                    {op.name}
+                  </span>
+                ))}
+                {(!diagResult.operators || diagResult.operators.length === 0) && (
+                  <span className="text-xs text-gray-400">None</span>
+                )}
+              </div>
+            </div>
+            {diagResult.lookup_error && (
+              <div className="p-3 bg-amber-50 rounded-lg border border-amber-100">
+                <p className="text-xs text-amber-800">Lookup service error: {diagResult.lookup_error}</p>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DiagStat({ label, value, ok }: { label: string; value: number; ok: boolean }) {
+  return (
+    <div className={`p-4 rounded-xl border ${ok ? 'border-accent-200 bg-accent-50' : 'border-red-200 bg-red-50'}`}>
+      <div className="flex items-center gap-2">
+        {ok ? <CheckCircle2 className="w-4 h-4 text-accent-600" /> : <AlertCircle className="w-4 h-4 text-red-600" />}
+        <span className="text-2xl font-bold font-display text-gray-900">{value}</span>
+      </div>
+      <p className="text-sm text-gray-600 mt-1">{label}</p>
     </div>
   );
 }

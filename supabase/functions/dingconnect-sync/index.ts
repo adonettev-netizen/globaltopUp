@@ -47,17 +47,27 @@ async function dingFetch(path: string): Promise<any> {
     },
   });
 
+  const text = await res.text();
   if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`DingConnect ${path} failed (${res.status}): ${txt}`);
+    throw new Error(`DingConnect ${path} failed (${res.status}): ${text.slice(0, 500)}`);
   }
 
-  return res.json();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`DingConnect ${path} returned non-JSON response: ${text.slice(0, 200)}`);
+  }
 }
 
+/**
+ * DingConnect API responses use a consistent wrapper:
+ * { ResultCode: number, ErrorCodes: [...], Items: [...] }
+ * The Items array holds the actual data objects (countries, providers, products).
+ */
 function extractItems(data: any): any[] {
   if (!data) return [];
-  return data.Countries || data.Items || data.items || data.ProviderList || data.Providers || data.ProductList || data.Products || [];
+  // DingConnect uses "Items" consistently across all list endpoints
+  return data.Items || data.items || [];
 }
 
 async function parallelMap<T, R>(items: T[], concurrency: number, fn: (item: T) => Promise<R>): Promise<R[]> {
@@ -82,7 +92,8 @@ interface DingCountry {
 interface DingProvider {
   ProviderCode: string;
   ProviderName: string;
-  CountryCode: string;
+  CountryIso?: string;
+  CountryCode?: string;
   ProviderLogoUrl?: string | null;
 }
 
@@ -94,111 +105,179 @@ interface DingProduct {
   LocalCurrency: string;
   WholesalePrice?: number | null;
   WholesaleAmount?: number | null;
-  ReceiveAmount?: number;
-  ReceiveCurrency?: string;
+  UatNumber?: string | null;
 }
 
-async function syncCountries(supabase: any): Promise<number> {
-  const data = await dingFetch("/GetCountries");
-  const items: DingCountry[] = extractItems(data);
+async function syncCountries(supabase: any): Promise<{ count: number; error: string | null }> {
+  try {
+    const data = await dingFetch("/GetCountries");
+    const items: DingCountry[] = extractItems(data);
 
-  const rows = items.map((c) => ({
-    ding_country_code: c.CountryCode,
-    name: c.CountryName,
-    iso_code: c.CountryIso || c.CountryIso3 || null,
-    calling_code: c.CallingCode || c.IsoCode || "",
-    flag: null,
-    is_supported: true,
-    last_synced_at: new Date().toISOString(),
-  }));
-
-  const { error } = await supabase
-    .from("countries")
-    .upsert(rows, { onConflict: "ding_country_code" });
-
-  if (error) console.error("Country bulk upsert error:", error.message);
-
-  return items.length;
-}
-
-async function syncProviders(supabase: any): Promise<number> {
-  const { data: countries } = await supabase
-    .from("countries")
-    .select("id, ding_country_code")
-    .eq("is_supported", true);
-
-  if (!countries || countries.length === 0) return 0;
-
-  const allProviders: any[] = [];
-
-  await parallelMap(countries, CONCURRENCY, async (country: any) => {
-    try {
-      const data = await dingFetch(`/GetProviders?countryCode=${country.ding_country_code}`);
-      const items: DingProvider[] = extractItems(data);
-      for (const p of items) {
-        allProviders.push({
-          ding_operator_code: p.ProviderCode,
-          country_id: country.id,
-          name: p.ProviderName,
-          logo_url: p.ProviderLogoUrl || null,
-          is_active: true,
-          last_synced_at: new Date().toISOString(),
-        });
-      }
-    } catch (err) {
-      console.error(`Providers fetch failed for ${country.ding_country_code}:`, err.message);
+    if (items.length === 0) {
+      return { count: 0, error: "GetCountries returned 0 items — check API key permissions" };
     }
-  });
 
-  if (allProviders.length > 0) {
+    const rows = items.map((c) => ({
+      ding_country_code: c.CountryCode,
+      name: c.CountryName,
+      iso_code: c.CountryIso || c.CountryIso3 || null,
+      calling_code: c.CallingCode || c.IsoCode || "",
+      is_supported: true,
+      last_synced_at: new Date().toISOString(),
+    }));
+
     const { error } = await supabase
+      .from("countries")
+      .upsert(rows, { onConflict: "ding_country_code" });
+
+    if (error) {
+      return { count: 0, error: `Country upsert failed: ${error.message}` };
+    }
+
+    // Mark countries no longer returned as unsupported (without deleting — preserve orders)
+    const returnedCodes = items.map((c) => c.CountryCode);
+    await supabase
+      .from("countries")
+      .update({ is_supported: false })
+      .not("ding_country_code", "in", `(${returnedCodes.map((c) => `'${c}'`).join(",")})`);
+
+    return { count: items.length, error: null };
+  } catch (e) {
+    return { count: 0, error: e.message };
+  }
+}
+
+async function syncProviders(supabase: any): Promise<{ count: number; error: string | null }> {
+  try {
+    // GetProviders returns ALL providers at once — no country filter parameter.
+    // Each provider has a CountryIso field linking it to its country.
+    const data = await dingFetch("/GetProviders");
+    const items: DingProvider[] = extractItems(data);
+
+    if (items.length === 0) {
+      return { count: 0, error: "GetProviders returned 0 items — check API key permissions" };
+    }
+
+    // Build a lookup of country ISO code → country UUID
+    const { data: countries } = await supabase
+      .from("countries")
+      .select("id, ding_country_code, iso_code");
+    if (!countries || countries.length === 0) {
+      return { count: 0, error: "No countries in database — sync countries first" };
+    }
+
+    // Map by both iso_code and ding_country_code for matching flexibility
+    const countryByIso: Record<string, any> = {};
+    const countryByCode: Record<string, any> = {};
+    for (const c of countries) {
+      if (c.iso_code) countryByIso[c.iso_code.toUpperCase()] = c;
+      countryByCode[c.ding_country_code] = c;
+    }
+
+    const allProviders: any[] = [];
+    let skipped = 0;
+
+    for (const p of items) {
+      // Match provider to country by CountryIso (preferred) or CountryCode fallback
+      const countryMatch = (p.CountryIso && countryByIso[p.CountryIso.toUpperCase()]) ||
+                           (p.CountryCode && countryByCode[p.CountryCode]) || null;
+      if (!countryMatch) {
+        skipped++;
+        continue;
+      }
+
+      allProviders.push({
+        ding_operator_code: p.ProviderCode,
+        country_id: countryMatch.id,
+        name: p.ProviderName,
+        logo_url: p.ProviderLogoUrl || null,
+        is_active: true,
+        last_synced_at: new Date().toISOString(),
+      });
+    }
+
+    if (allProviders.length > 0) {
+      const { error } = await supabase
+        .from("operators")
+        .upsert(allProviders, { onConflict: "ding_operator_code" });
+      if (error) {
+        return { count: 0, error: `Provider upsert failed: ${error.message}` };
+      }
+    }
+
+    // Mark operators no longer returned as inactive (preserve orders/FKs)
+    const returnedCodes = allProviders.map((p) => p.ding_operator_code);
+    if (returnedCodes.length > 0) {
+      await supabase
+        .from("operators")
+        .update({ is_active: false })
+        .not("ding_operator_code", "in", `(${returnedCodes.map((c) => `'${c}'`).join(",")})`);
+    }
+
+    return { count: allProviders.length, error: skipped > 0 ? `${skipped} providers skipped (no matching country)` : null };
+  } catch (e) {
+    return { count: 0, error: e.message };
+  }
+}
+
+async function syncProducts(supabase: any): Promise<{ count: number; error: string | null }> {
+  try {
+    const { data: providers } = await supabase
       .from("operators")
-      .upsert(allProviders, { onConflict: "ding_operator_code" });
-    if (error) console.error("Provider bulk upsert error:", error.message);
-  }
+      .select("id, ding_operator_code")
+      .eq("is_active", true);
 
-  return allProviders.length;
-}
-
-async function syncProducts(supabase: any): Promise<number> {
-  const { data: providers } = await supabase
-    .from("operators")
-    .select("id, ding_operator_code")
-    .eq("is_active", true);
-
-  if (!providers || providers.length === 0) return 0;
-
-  const allProducts: any[] = [];
-
-  await parallelMap(providers, CONCURRENCY, async (provider: any) => {
-    try {
-      const data = await dingFetch(`/GetProducts?providerCode=${provider.ding_operator_code}`);
-      const items: DingProduct[] = extractItems(data);
-      for (const p of items) {
-        allProducts.push({
-          ding_product_code: p.ProductCode,
-          operator_id: provider.id,
-          product_name: p.ProductName || `${p.LocalCurrency} ${p.LocalAmount}`,
-          local_amount: p.LocalAmount,
-          local_currency: p.LocalCurrency,
-          wholesale_cost: p.WholesalePrice ?? p.WholesaleAmount ?? null,
-          is_active: true,
-          last_synced_at: new Date().toISOString(),
-        });
-      }
-    } catch (err) {
-      console.error(`Products fetch failed for ${provider.ding_operator_code}:`, err.message);
+    if (!providers || providers.length === 0) {
+      return { count: 0, error: "No active operators in database — sync providers first" };
     }
-  });
 
-  if (allProducts.length > 0) {
-    const { error } = await supabase
-      .from("recharge_products")
-      .upsert(allProducts, { onConflict: "ding_product_code" });
-    if (error) console.error("Product bulk upsert error:", error.message);
+    const allProducts: any[] = [];
+    let errors = 0;
+
+    await parallelMap(providers, CONCURRENCY, async (provider: any) => {
+      try {
+        const data = await dingFetch(`/GetProducts?providerCode=${encodeURIComponent(provider.ding_operator_code)}`);
+        const items: DingProduct[] = extractItems(data);
+
+        for (const p of items) {
+          allProducts.push({
+            ding_product_code: p.ProductCode,
+            operator_id: provider.id,
+            product_name: p.ProductName || `${p.LocalCurrency} ${p.LocalAmount}`,
+            local_amount: p.LocalAmount,
+            local_currency: p.LocalCurrency,
+            wholesale_cost: p.WholesalePrice ?? p.WholesaleAmount ?? null,
+            is_active: true,
+            last_synced_at: new Date().toISOString(),
+          });
+        }
+      } catch (err) {
+        console.error(`Products fetch failed for ${provider.ding_operator_code}:`, err.message);
+        errors++;
+      }
+    });
+
+    if (allProducts.length > 0) {
+      // Delete and re-insert for this provider batch to remove stale products
+      // (upsert keeps old products that may no longer exist)
+      const providerIds = providers.map((p: any) => p.id);
+      await supabase
+        .from("recharge_products")
+        .delete()
+        .in("operator_id", providerIds);
+
+      const { error } = await supabase
+        .from("recharge_products")
+        .insert(allProducts);
+      if (error) {
+        return { count: 0, error: `Product insert failed: ${error.message}` };
+      }
+    }
+
+    return { count: allProducts.length, error: errors > 0 ? `${errors} provider product fetches failed` : null };
+  } catch (e) {
+    return { count: 0, error: e.message };
   }
-
-  return allProducts.length;
 }
 
 Deno.serve(async (req: Request) => {
@@ -221,32 +300,36 @@ Deno.serve(async (req: Request) => {
 
     try {
       let records = 0;
-      const breakdown: Record<string, number> = {};
+      const breakdown: Record<string, { count: number; error: string | null }> = {};
+      let fatalError: string | null = null;
 
       if (entity === "countries" || entity === "full") {
-        const n = await syncCountries(supabase);
-        breakdown.countries = n;
-        records += n;
+        const result = await syncCountries(supabase);
+        breakdown.countries = result;
+        records += result.count;
+        if (result.error && entity === "countries") fatalError = result.error;
       }
-      if (entity === "operators" || entity === "full") {
-        const n = await syncProviders(supabase);
-        breakdown.operators = n;
-        records += n;
+      if ((entity === "operators" || entity === "full") && !fatalError) {
+        const result = await syncProviders(supabase);
+        breakdown.operators = result;
+        records += result.count;
+        if (result.error && entity === "operators") fatalError = result.error;
       }
-      if (entity === "products" || entity === "full") {
-        const n = await syncProducts(supabase);
-        breakdown.products = n;
-        records += n;
+      if ((entity === "products" || entity === "full") && !fatalError) {
+        const result = await syncProducts(supabase);
+        breakdown.products = result;
+        records += result.count;
+        if (result.error && entity === "products") fatalError = result.error;
       }
 
       if (logId) {
         await supabase
           .from("sync_logs")
-          .update({ status: "success", records_processed: records, completed_at: new Date().toISOString() })
+          .update({ status: fatalError ? "failed" : "success", records_processed: records, error_message: fatalError, completed_at: new Date().toISOString() })
           .eq("id", logId);
       }
 
-      return new Response(JSON.stringify({ success: true, entity, records, breakdown }), {
+      return new Response(JSON.stringify({ success: !fatalError, entity, records, breakdown, error: fatalError }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     } catch (innerErr) {

@@ -39,16 +39,48 @@ async function dingFetch(path: string): Promise<any> {
   const res = await fetch(`${DING_BASE}${path}`, {
     headers: { "api_key": apiKey, "Content-Type": "application/json" },
   });
+  const text = await res.text();
   if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`DingConnect ${path} failed (${res.status}): ${txt}`);
+    throw new Error(`DingConnect ${path} failed (${res.status}): ${text.slice(0, 500)}`);
   }
-  return res.json();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`DingConnect ${path} returned non-JSON: ${text.slice(0, 200)}`);
+  }
 }
 
-function extractItems(data: any): any[] {
-  if (!data) return [];
-  return data.Countries || data.Items || data.items || data.ProviderList || data.Providers || data.ProductList || data.Products || [];
+/**
+ * DingConnect GetAccountLookup returns an AccountLookup object directly
+ * (not wrapped in Items), containing ProviderCode, CountryCode, RegionCode.
+ * Per the official FAQ: for non-valid/incomplete numbers, the API still
+ * returns a result but it may default to the first provider for the
+ * detected country — so this is an ESTIMATE, not authoritative.
+ * We surface it as a "suggested" operator and always show the full list
+ * for manual selection.
+ */
+async function lookupOperator(accountNumber: string): Promise<{
+  providerCode: string | null;
+  countryCode: string | null;
+  isEstimate: boolean;
+  error: string | null;
+}> {
+  try {
+    const data = await dingFetch(`/GetAccountLookup?accountNumber=${encodeURIComponent(accountNumber)}`);
+
+    // Response fields are PascalCase: ProviderCode, CountryCode, RegionCode, ResultCode
+    const providerCode = data.ProviderCode || data.providerCode || null;
+    const countryCode = data.CountryCode || data.countryCode || null;
+    const resultCode = data.ResultCode ?? data.resultCode;
+
+    // ResultCode 1 means "not sure about the products for the account"
+    // — the provider returned is an estimate, not confirmed
+    const isEstimate = resultCode === 1 || !providerCode;
+
+    return { providerCode, countryCode, isEstimate, error: null };
+  } catch (e) {
+    return { providerCode: null, countryCode: null, isEstimate: true, error: e.message };
+  }
 }
 
 Deno.serve(async (req: Request) => {
@@ -58,19 +90,24 @@ Deno.serve(async (req: Request) => {
 
   try {
     const url = new URL(req.url);
-    const phone = (url.searchParams.get("phone") || "").replace(/[^0-9+]/g, "");
+    // Normalize: strip everything except digits and leading +
+    const rawPhone = (url.searchParams.get("phone") || "").trim();
+    const phone = rawPhone.replace(/[^0-9+]/g, "");
 
-    if (!phone || phone.replace("+", "").length < 4) {
-      return new Response(JSON.stringify({ error: "A valid phone number is required" }), {
-        status: 400,
+    if (!phone || phone.replace("+", "").length < 2) {
+      return new Response(JSON.stringify({
+        detected: false,
+        message: "Please enter a phone number with country code.",
+      }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
     const supabase = supabaseAdmin();
-    let normalized = phone.replace(/^\+/, "");
+    const normalized = phone.replace(/^\+/, "");
+    const digitsOnly = normalized;
 
-    // Find matching country by calling code (longest prefix match)
+    // Load all supported countries with calling codes
     const { data: countries } = await supabase
       .from("countries")
       .select("id, ding_country_code, name, iso_code, calling_code, flag")
@@ -78,17 +115,21 @@ Deno.serve(async (req: Request) => {
       .order("calling_code", { ascending: false });
 
     if (!countries || countries.length === 0) {
-      return new Response(JSON.stringify({ error: "No supported countries available in the catalog" }), {
+      return new Response(JSON.stringify({
+        detected: false,
+        message: "No supported destinations are configured yet. An administrator needs to run a catalog sync first.",
+      }), {
         status: 503,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
+    // Longest-prefix match on calling code
     let matchedCountry: any = null;
     let bestLen = 0;
     for (const c of countries) {
       const cc = (c.calling_code || "").replace(/[^0-9]/g, "");
-      if (cc && normalized.startsWith(cc) && cc.length > bestLen) {
+      if (cc && digitsOnly.startsWith(cc) && cc.length > bestLen) {
         matchedCountry = c;
         bestLen = cc.length;
       }
@@ -97,15 +138,20 @@ Deno.serve(async (req: Request) => {
     if (!matchedCountry) {
       return new Response(JSON.stringify({
         detected: false,
-        message: "Could not identify the destination country from this phone number. Please check the number and try again.",
+        message: "Could not identify the destination country from this phone number. Please include the country code (e.g. +509 for Haiti).",
       }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    const nationalNumber = normalized.slice(bestLen);
+    const nationalNumber = digitsOnly.slice(bestLen);
 
-    // Get providers/operators for the matched country from DB
+    // For +1 (NANP), we need at least 4 digits of the national number to disambiguate
+    // For other countries, 2 digits is enough to show the country
+    const minNationalForOperators = bestLen === 1 ? 4 : 2;
+    const hasEnoughDigits = nationalNumber.length >= minNationalForOperators;
+
+    // Get operators for the matched country from DB
     const { data: providers } = await supabase
       .from("operators")
       .select("id, ding_operator_code, name, logo_url")
@@ -113,17 +159,34 @@ Deno.serve(async (req: Request) => {
       .eq("is_active", true)
       .order("name");
 
-    // Attempt operator detection via DingConnect GetAccountLookup
-    let detectedProvider: any = null;
+    const operators = providers || [];
 
-    try {
-      const lookupData = await dingFetch(`/GetAccountLookup?accountNumber=${encodeURIComponent("+" + normalized)}`);
-        const lookupProviderCode = lookupData.ProviderCode || lookupData.providerCode;
-        if (lookupProviderCode && providers) {
-          detectedProvider = providers.find((p: any) => p.ding_operator_code === lookupProviderCode) || null;
+    // Attempt operator detection only when we have enough digits
+    let detectedOperator: any = null;
+    let operatorDetectionMethod: "none" | "estimate" | "confirmed" = "none";
+    let lookupError: string | null = null;
+
+    if (hasEnoughDigits && operators.length > 0) {
+      const fullNumber = "+" + digitsOnly;
+      const lookup = await lookupOperator(fullNumber);
+
+      if (lookup.error) {
+        lookupError = lookup.error;
+      }
+
+      if (lookup.providerCode) {
+        // Match the DingConnect ProviderCode against our operators
+        detectedOperator = operators.find(
+          (p: any) => p.ding_operator_code === lookup.providerCode
+        ) || null;
+
+        if (detectedOperator) {
+          // Per DingConnect FAQ, GetAccountLookup is an estimate for
+          // non-validated numbers. Only mark "confirmed" if the API
+          // explicitly validated (ResultCode !== 1).
+          operatorDetectionMethod = lookup.isEstimate ? "estimate" : "confirmed";
         }
-    } catch (e) {
-        console.error("Account lookup failed:", e.message);
+      }
     }
 
     return new Response(JSON.stringify({
@@ -136,10 +199,13 @@ Deno.serve(async (req: Request) => {
         flag: matchedCountry.flag,
       },
       national_number: nationalNumber,
-      full_number: "+" + normalized,
-      operators: providers || [],
-      detected_operator: detectedProvider,
-      auto_detected: detectedProvider !== null,
+      full_number: "+" + digitsOnly,
+      operators,
+      detected_operator: detectedOperator,
+      operator_detection_method: operatorDetectionMethod,
+      auto_detected: detectedOperator !== null,
+      lookup_error: lookupError,
+      needs_more_digits: !hasEnoughDigits,
     }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });

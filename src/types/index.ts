@@ -42,6 +42,9 @@ export interface LookupResult {
   operators?: Operator[];
   detected_operator?: Operator | null;
   auto_detected?: boolean;
+  operator_detection_method?: 'none' | 'estimate' | 'confirmed';
+  lookup_error?: string | null;
+  needs_more_digits?: boolean;
 }
 
 export interface Order {
