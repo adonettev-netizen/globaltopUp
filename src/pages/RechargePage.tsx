@@ -1,12 +1,11 @@
-import { useState, useEffect, useCallback } from 'react';
-import { ArrowLeft, ArrowRight, Check, Loader2, Shield, Smartphone, CreditCard, Lock, AlertCircle } from 'lucide-react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { ArrowLeft, ArrowRight, Check, Loader2, Shield, Smartphone, CreditCard, Lock, AlertCircle, DollarSign, TrendingUp, Info } from 'lucide-react';
 import { PhoneLookup } from '@/components/PhoneLookup';
-import { StatusBadge } from '@/components/StatusBadge';
 import { supabase, callEdgeFunction } from '@/lib/supabase';
 import { navigate } from '@/lib/router';
-import type { LookupResult, Operator, RechargeProduct, CreateOrderResponse, Order } from '@/types';
+import type { LookupResult, Operator, CreateOrderResponse, PricingQuote } from '@/types';
 
-type Step = 'phone' | 'product' | 'review' | 'payment' | 'processing';
+type Step = 'phone' | 'amount' | 'review' | 'payment';
 
 interface PhoneData {
   phone: string;
@@ -20,63 +19,113 @@ interface Props {
   initialPhoneData?: PhoneData | null;
 }
 
+const SUGGESTED_AMOUNTS = [10, 20, 30, 50, 100];
+const MIN_BRL = 10;
+
+function formatBRL(value: number): string {
+  return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
+}
+
+function formatCurrency(value: number, currency: string): string {
+  try {
+    return new Intl.NumberFormat('en', { style: 'currency', currency }).format(value);
+  } catch {
+    return `${currency} ${value.toFixed(2)}`;
+  }
+}
+
 export function RechargePage({ onOrderCreated, initialPhoneData }: Props) {
-  const [step, setStep] = useState<Step>(initialPhoneData ? 'product' : 'phone');
+  const [step, setStep] = useState<Step>(initialPhoneData ? 'amount' : 'phone');
   const [phoneData, setPhoneData] = useState<PhoneData | null>(initialPhoneData ?? null);
 
-  const [products, setProducts] = useState<RechargeProduct[]>([]);
-  const [loadingProducts, setLoadingProducts] = useState(false);
-  const [selectedProduct, setSelectedProduct] = useState<RechargeProduct | null>(null);
+  const [brlAmount, setBrlAmount] = useState<string>('');
+  const [quote, setQuote] = useState<PricingQuote | null>(null);
+  const [quoteLoading, setQuoteLoading] = useState(false);
+  const [quoteError, setQuoteError] = useState<string | null>(null);
+  const [amountTouched, setAmountTouched] = useState(false);
+  const [selectedAltProduct, setSelectedAltProduct] = useState<string | null>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
+  const quoteRequestId = useRef(0);
 
-  const [paymentCurrency, setPaymentCurrency] = useState('USD');
-  const [selectedProvider, setSelectedProvider] = useState<'stripe' | 'mercado_pago'>('stripe');
+  const [selectedProvider, setSelectedProvider] = useState<'stripe' | 'mercado_pago'>('mercado_pago');
   const [creatingOrder, setCreatingOrder] = useState(false);
   const [orderError, setOrderError] = useState<string | null>(null);
   const [createdOrder, setCreatedOrder] = useState<CreateOrderResponse | null>(null);
 
-  // Load products when operator is confirmed
-  const loadProducts = useCallback(async () => {
-    if (!phoneData?.operator || !phoneData.operator.id) return;
-    setLoadingProducts(true);
-    const { data, error } = await supabase
-      .from('recharge_products')
-      .select('id, ding_product_code, product_name, local_amount, local_currency, wholesale_cost, is_active')
-      .eq('operator_id', phoneData.operator.id)
-      .eq('is_active', true)
-      .order('local_amount', { ascending: true });
+  const numericAmount = parseFloat(brlAmount) || 0;
+  const isAmountValid = numericAmount >= MIN_BRL;
 
-    setLoadingProducts(false);
-    if (error) {
-      console.error('Error loading products:', error);
+  // Fetch pricing quote when amount changes
+  const fetchQuote = useCallback(async (amount: number, operatorId: string) => {
+    const currentRequestId = ++quoteRequestId.current;
+    if (amount < MIN_BRL) {
+      setQuote(null);
+      setQuoteError(null);
       return;
     }
-    setProducts((data as RechargeProduct[]) || []);
-  }, [phoneData?.operator]);
 
-  useEffect(() => {
-    if (step === 'product' && phoneData?.operator) {
-      loadProducts();
+    setQuoteLoading(true);
+    setQuoteError(null);
+
+    const { data, error } = await callEdgeFunction<PricingQuote>('pricing-quote', {
+      method: 'GET',
+      params: { operator_id: operatorId, amount_brl: amount.toString() },
+    });
+
+    if (currentRequestId !== quoteRequestId.current) return;
+
+    setQuoteLoading(false);
+    if (error) {
+      setQuoteError(error);
+      setQuote(null);
+    } else if (data) {
+      setQuote(data);
+      setSelectedAltProduct(null);
     }
-  }, [step, phoneData?.operator, loadProducts]);
+  }, []);
 
-  // Detect if country is Brazil → BRL/PIX
-  useEffect(() => {
-    if (phoneData?.country?.iso_code === 'BR') {
-      setPaymentCurrency('BRL');
+  const handleAmountInput = (value: string) => {
+    // Only allow numbers and decimal point
+    const cleaned = value.replace(/[^0-9.]/g, '');
+    setBrlAmount(cleaned);
+    setAmountTouched(true);
+
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+
+    const num = parseFloat(cleaned);
+    if (num >= MIN_BRL && phoneData?.operator?.id) {
+      debounceRef.current = setTimeout(() => fetchQuote(num, phoneData.operator!.id), 500);
     } else {
-      setPaymentCurrency('USD');
+      setQuote(null);
+      setQuoteError(null);
     }
-  }, [phoneData?.country]);
+  };
+
+  const handleSuggestedAmount = (amount: number) => {
+    setBrlAmount(amount.toString());
+    setAmountTouched(true);
+    if (phoneData?.operator?.id) {
+      fetchQuote(amount, phoneData.operator.id);
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, []);
 
   const handleContinue = (data: typeof phoneData) => {
     setPhoneData(data);
-    setStep('product');
+    setStep('amount');
   };
 
   const handleCreateOrder = async () => {
-    if (!phoneData || !selectedProduct) return;
+    if (!phoneData || !quote) return;
     setCreatingOrder(true);
     setOrderError(null);
+
+    const productId = selectedAltProduct || quote.matched_product.id;
 
     const { data, error } = await callEdgeFunction<CreateOrderResponse>('create-order', {
       method: 'POST',
@@ -84,8 +133,8 @@ export function RechargePage({ onOrderCreated, initialPhoneData }: Props) {
         recipient_phone: phoneData.phone,
         country_id: phoneData.country!.id,
         operator_id: phoneData.operator?.id,
-        product_id: selectedProduct.id,
-        payment_currency: paymentCurrency,
+        product_id: productId,
+        amount_brl: numericAmount.toString(),
         payment_provider: selectedProvider,
       },
     });
@@ -112,18 +161,20 @@ export function RechargePage({ onOrderCreated, initialPhoneData }: Props) {
 
   const steps: { key: Step; label: string }[] = [
     { key: 'phone', label: 'Phone' },
-    { key: 'product', label: 'Amount' },
+    { key: 'amount', label: 'Amount' },
     { key: 'review', label: 'Review' },
     { key: 'payment', label: 'Pay' },
   ];
 
   const currentStepIndex = steps.findIndex((s) => s.key === step);
 
+  const canProceedToReview = isAmountValid && quote && !quoteLoading;
+
   return (
     <div className="min-h-screen bg-gray-50 pt-20 pb-16">
       <div className="max-w-2xl mx-auto px-4 sm:px-6">
         {/* Progress */}
-        {step !== 'processing' && (
+        {step !== 'payment' && (
           <div className="mb-8">
             <div className="flex items-center justify-between">
               {steps.map((s, i) => (
@@ -169,14 +220,14 @@ export function RechargePage({ onOrderCreated, initialPhoneData }: Props) {
           </div>
         )}
 
-        {/* Step: Product */}
-        {step === 'product' && phoneData && (
+        {/* Step: Amount */}
+        {step === 'amount' && phoneData && (
           <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 sm:p-8 animate-fade-in-up">
             <div className="flex items-center gap-3 mb-6">
               <button onClick={() => setStep('phone')} className="text-gray-400 hover:text-gray-600">
                 <ArrowLeft className="w-5 h-5" />
               </button>
-              <h2 className="font-display text-xl font-bold text-gray-900">Select recharge amount</h2>
+              <h2 className="font-display text-xl font-bold text-gray-900">Choose recharge amount</h2>
             </div>
 
             <div className="flex items-center gap-3 p-3 bg-brand-50 rounded-xl mb-6">
@@ -187,54 +238,181 @@ export function RechargePage({ onOrderCreated, initialPhoneData }: Props) {
               </div>
             </div>
 
-            {loadingProducts ? (
-              <div className="space-y-3">
-                {[1, 2, 3].map((i) => (
-                  <div key={i} className="h-20 skeleton rounded-xl" />
+            {/* Amount input */}
+            <div className="mb-4">
+              <label className="block text-sm font-semibold text-gray-900 mb-2">Your recharge amount</label>
+              <div className="relative">
+                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-xl font-bold text-gray-500">R$</span>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  value={brlAmount}
+                  onChange={(e) => handleAmountInput(e.target.value)}
+                  placeholder="0,00"
+                  className={`w-full pl-12 pr-4 py-4 text-2xl font-bold font-display rounded-xl border-2 outline-none transition-all ${
+                    amountTouched && !isAmountValid
+                      ? 'border-red-300 bg-red-50'
+                      : isAmountValid
+                      ? 'border-brand-400 bg-brand-50'
+                      : 'border-gray-200 focus:border-brand-400'
+                  }`}
+                  autoFocus
+                />
+                {quoteLoading && <Loader2 className="absolute right-4 top-1/2 -translate-y-1/2 w-5 h-5 text-brand-500 animate-spin" />}
+              </div>
+              <p className={`text-xs mt-2 ${amountTouched && !isAmountValid ? 'text-red-600' : 'text-gray-500'}`}>
+                {amountTouched && !isAmountValid
+                  ? `Minimum amount is ${formatBRL(MIN_BRL)}`
+                  : `Minimum: ${formatBRL(MIN_BRL)}`}
+              </p>
+            </div>
+
+            {/* Suggested amounts */}
+            <div className="mb-6">
+              <p className="text-xs font-medium text-gray-500 mb-2">Quick select</p>
+              <div className="flex flex-wrap gap-2">
+                {SUGGESTED_AMOUNTS.map((amt) => (
+                  <button
+                    key={amt}
+                    onClick={() => handleSuggestedAmount(amt)}
+                    className={`px-4 py-2 rounded-lg font-semibold text-sm transition-all ${
+                      numericAmount === amt
+                        ? 'bg-brand-600 text-white'
+                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                    }`}
+                  >
+                    {formatBRL(amt)}
+                  </button>
                 ))}
               </div>
-            ) : products.length === 0 ? (
-              <div className="p-6 bg-amber-50 rounded-xl border border-amber-100 text-center">
-                <AlertCircle className="w-8 h-8 text-amber-500 mx-auto mb-2" />
-                <p className="text-amber-800 font-medium">No recharge products available</p>
-                <p className="text-sm text-amber-700 mt-1">
-                  No products are currently synced for this operator. An administrator needs to run a DingConnect synchronization to load available recharges.
-                </p>
-              </div>
-            ) : (
-              <>
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                  {products.map((p) => (
-                    <button
-                      key={p.id}
-                      onClick={() => {
-                        setSelectedProduct(p);
-                        setStep('review');
-                      }}
-                      className="p-4 rounded-xl border-2 text-left transition-all hover:border-brand-400 hover:bg-brand-50 hover:shadow-sm active:scale-[0.98] ${
-                        selectedProduct?.id === p.id ? 'border-brand-500 bg-brand-50' : 'border-gray-200'
-                      }"
-                    >
-                      <div className="text-2xl font-bold text-gray-900 font-display">
-                        {p.local_currency} {p.local_amount.toLocaleString()}
-                      </div>
-                      <div className="text-xs text-gray-500 mt-1">{p.product_name}</div>
-                    </button>
-                  ))}
+            </div>
+
+            {/* Quote results */}
+            {quote && !quoteLoading && (
+              <div className="space-y-4 animate-fade-in-up">
+                {/* Estimated recipient value */}
+                <div className="p-4 bg-accent-50 rounded-xl border border-accent-100">
+                  <div className="flex items-center gap-2 mb-2">
+                    <TrendingUp className="w-4 h-4 text-accent-600" />
+                    <span className="text-sm font-semibold text-gray-900">Estimated recipient value</span>
+                  </div>
+                  <p className="text-2xl font-bold font-display text-gray-900">
+                    {formatCurrency(quote.matched_product.local_amount, quote.destination_currency)}
+                  </p>
+                  <p className="text-xs text-gray-500 mt-1">
+                    {quote.matched_product.is_exact_match
+                      ? 'Exact match found'
+                      : quote.matched_product.is_within_tolerance
+                      ? `Close match (±${formatCurrency(quote.matched_product.difference_from_requested, quote.destination_currency)})`
+                      : `Closest available denomination`}
+                  </p>
                 </div>
-                <p className="text-xs text-gray-400 mt-4 text-center">
-                  Prices shown in local currency. Your final price will be calculated in the next step.
-                </p>
-              </>
+
+                {/* Exchange rate */}
+                <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                  <span className="text-sm text-gray-600">Exchange rate</span>
+                  <span className="text-sm font-medium text-gray-900">
+                    1 BRL = {quote.exchange_rate_brl_to_dest.toFixed(2)} {quote.destination_currency}
+                  </span>
+                </div>
+
+                {/* Total to pay */}
+                <div className="p-4 bg-brand-50 rounded-xl border border-brand-100">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-semibold text-gray-900">Total to pay</span>
+                    <span className="text-2xl font-bold font-display text-brand-700">
+                      {formatBRL(quote.customer_price_brl)}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Alternatives (if not exact match) */}
+                {!quote.matched_product.is_exact_match && quote.alternatives && quote.alternatives.length > 0 && (
+                  <div className="p-4 bg-amber-50 rounded-xl border border-amber-100">
+                    <div className="flex items-start gap-2 mb-3">
+                      <Info className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
+                      <p className="text-sm text-amber-800">
+                        The exact amount isn't available. Here are the closest options — select one to continue:
+                      </p>
+                    </div>
+                    <div className="space-y-2">
+                      <button
+                        onClick={() => setSelectedAltProduct(null)}
+                        className={`w-full flex items-center justify-between p-3 rounded-lg border-2 transition-all text-left ${
+                          !selectedAltProduct ? 'border-brand-500 bg-brand-50' : 'border-gray-200 hover:border-brand-300'
+                        }`}
+                      >
+                        <div>
+                          <p className="font-semibold text-gray-900">
+                            {formatCurrency(quote.matched_product.local_amount, quote.destination_currency)}
+                          </p>
+                          <p className="text-xs text-gray-500">{quote.matched_product.product_name}</p>
+                        </div>
+                        <span className="text-sm font-medium text-gray-700">
+                          ~{formatBRL(quote.customer_price_brl)}
+                        </span>
+                      </button>
+                      {quote.alternatives.slice(0, 4).map((alt) => (
+                        <button
+                          key={alt.id}
+                          onClick={() => setSelectedAltProduct(alt.id)}
+                          className={`w-full flex items-center justify-between p-3 rounded-lg border-2 transition-all text-left ${
+                            selectedAltProduct === alt.id ? 'border-brand-500 bg-brand-50' : 'border-gray-200 hover:border-brand-300'
+                          }`}
+                        >
+                          <div>
+                            <p className="font-semibold text-gray-900">
+                              {formatCurrency(alt.local_amount, alt.local_currency)}
+                            </p>
+                            <p className="text-xs text-gray-500">{alt.product_name}</p>
+                          </div>
+                          <span className="text-sm font-medium text-gray-700">
+                            ~{formatBRL(alt.estimated_brl_cost)}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {quoteError && (
+                  <div className="p-3 bg-red-50 rounded-lg border border-red-100 flex items-start gap-2">
+                    <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
+                    <p className="text-sm text-red-800">{quoteError}</p>
+                  </div>
+                )}
+
+                <button
+                  onClick={() => setStep('review')}
+                  disabled={!canProceedToReview}
+                  className="w-full py-4 rounded-xl bg-brand-600 text-white font-semibold text-lg hover:bg-brand-700 transition-all shadow-lg shadow-brand-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                >
+                  Continue to review <ArrowRight className="w-5 h-5" />
+                </button>
+              </div>
+            )}
+
+            {/* Empty state when amount is valid but quote not loaded yet */}
+            {isAmountValid && !quote && !quoteLoading && !quoteError && (
+              <div className="p-4 bg-gray-50 rounded-xl text-center">
+                <p className="text-sm text-gray-500">Calculating pricing...</p>
+              </div>
+            )}
+
+            {quoteError && !quote && (
+              <div className="p-3 bg-red-50 rounded-lg border border-red-100 flex items-start gap-2">
+                <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
+                <p className="text-sm text-red-800">{quoteError}</p>
+              </div>
             )}
           </div>
         )}
 
         {/* Step: Review */}
-        {step === 'review' && phoneData && selectedProduct && (
+        {step === 'review' && phoneData && quote && (
           <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 sm:p-8 animate-fade-in-up">
             <div className="flex items-center gap-3 mb-6">
-              <button onClick={() => setStep('product')} className="text-gray-400 hover:text-gray-600">
+              <button onClick={() => setStep('amount')} className="text-gray-400 hover:text-gray-600">
                 <ArrowLeft className="w-5 h-5" />
               </button>
               <h2 className="font-display text-xl font-bold text-gray-900">Review your order</h2>
@@ -244,21 +422,46 @@ export function RechargePage({ onOrderCreated, initialPhoneData }: Props) {
               <ReviewRow label="Destination" value={`${phoneData.country?.flag} ${phoneData.country?.name}`} />
               <ReviewRow label="Recipient" value={phoneData.phone} />
               <ReviewRow label="Operator" value={phoneData.operator?.name || 'Not selected'} />
-              <ReviewRow label="Recharge" value={`${selectedProduct.local_currency} ${selectedProduct.local_amount.toLocaleString()} — ${selectedProduct.product_name}`} />
-              <ReviewRow label="Payment currency" value={paymentCurrency} />
+              <ReviewRow label="Your amount" value={formatBRL(numericAmount)} />
+              <ReviewRow
+                label="Recipient receives"
+                value={formatCurrency(quote.matched_product.local_amount, quote.destination_currency)}
+              />
+              <ReviewRow
+                label="Exchange rate"
+                value={`1 BRL = ${quote.exchange_rate_brl_to_dest.toFixed(2)} ${quote.destination_currency}`}
+              />
+              <ReviewRow label="Total to pay" value={formatBRL(quote.customer_price_brl)} highlight />
             </div>
 
             <div className="p-4 bg-brand-50 rounded-xl border border-brand-100 mb-6">
-              <p className="text-sm text-gray-600 mb-1">You are purchasing a mobile recharge for:</p>
+              <p className="text-sm text-gray-600 mb-1">You are sending a mobile recharge to:</p>
               <p className="font-semibold text-gray-900">{phoneData.phone}</p>
               <p className="text-sm text-gray-600 mt-1">
-                The final price will be calculated securely on our servers and shown on the payment screen.
+                The recipient will receive approximately {formatCurrency(quote.matched_product.local_amount, quote.destination_currency)} in airtime.
               </p>
             </div>
 
+            {/* Payment method */}
             <div className="mb-6">
               <p className="text-sm font-semibold text-gray-900 mb-3">Payment method</p>
               <div className="space-y-2">
+                <button
+                  onClick={() => setSelectedProvider('mercado_pago')}
+                  className={`w-full flex items-center gap-3 p-4 rounded-xl border-2 transition-all text-left ${
+                    selectedProvider === 'mercado_pago'
+                      ? 'border-brand-500 bg-brand-50'
+                      : 'border-gray-200 hover:border-gray-300'
+                  }`}
+                >
+                  <Smartphone className={`w-6 h-6 ${selectedProvider === 'mercado_pago' ? 'text-brand-600' : 'text-gray-400'}`} />
+                  <div className="flex-1">
+                    <p className="font-semibold text-gray-900">PIX (Mercado Pago)</p>
+                    <p className="text-sm text-gray-600">Pay instantly with PIX QR code</p>
+                  </div>
+                  {selectedProvider === 'mercado_pago' && <Check className="w-5 h-5 text-brand-600" />}
+                </button>
+
                 <button
                   onClick={() => setSelectedProvider('stripe')}
                   className={`w-full flex items-center gap-3 p-4 rounded-xl border-2 transition-all text-left ${
@@ -273,27 +476,6 @@ export function RechargePage({ onOrderCreated, initialPhoneData }: Props) {
                     <p className="text-sm text-gray-600">Credit card, Apple Pay, Google Pay</p>
                   </div>
                   {selectedProvider === 'stripe' && <Check className="w-5 h-5 text-brand-600" />}
-                </button>
-
-                <button
-                  onClick={() => {
-                    setSelectedProvider('mercado_pago');
-                    if (phoneData.country?.iso_code === 'BR') {
-                      setPaymentCurrency('BRL');
-                    }
-                  }}
-                  className={`w-full flex items-center gap-3 p-4 rounded-xl border-2 transition-all text-left ${
-                    selectedProvider === 'mercado_pago'
-                      ? 'border-brand-500 bg-brand-50'
-                      : 'border-gray-200 hover:border-gray-300'
-                  }`}
-                >
-                  <Smartphone className={`w-6 h-6 ${selectedProvider === 'mercado_pago' ? 'text-brand-600' : 'text-gray-400'}`} />
-                  <div className="flex-1">
-                    <p className="font-semibold text-gray-900">PIX (Mercado Pago)</p>
-                    <p className="text-sm text-gray-600">Pay instantly with PIX QR code</p>
-                  </div>
-                  {selectedProvider === 'mercado_pago' && <Check className="w-5 h-5 text-brand-600" />}
                 </button>
               </div>
             </div>
@@ -338,7 +520,7 @@ export function RechargePage({ onOrderCreated, initialPhoneData }: Props) {
                 <div>
                   <p className="text-sm text-gray-600">Total to pay</p>
                   <p className="text-3xl font-bold font-display text-gray-900">
-                    {createdOrder.order.customer_currency} {createdOrder.order.customer_amount.toFixed(2)}
+                    {formatBRL(createdOrder.order.customer_amount)}
                   </p>
                 </div>
                 <div className="text-right">
@@ -346,6 +528,13 @@ export function RechargePage({ onOrderCreated, initialPhoneData }: Props) {
                   <p className="font-semibold text-gray-900">{createdOrder.order.recipient_phone}</p>
                 </div>
               </div>
+              {createdOrder.pricing && (
+                <div className="mt-3 pt-3 border-t border-brand-100">
+                  <p className="text-xs text-gray-500">
+                    Recipient receives ~{formatCurrency(createdOrder.pricing.destination_amount, createdOrder.pricing.destination_currency)}
+                  </p>
+                </div>
+              )}
             </div>
 
             <div className="space-y-2 mb-6">
@@ -388,7 +577,7 @@ export function RechargePage({ onOrderCreated, initialPhoneData }: Props) {
               className="w-full py-4 rounded-xl bg-brand-600 text-white font-semibold text-lg hover:bg-brand-700 transition-all shadow-lg shadow-brand-200 flex items-center justify-center gap-2"
             >
               <Shield className="w-5 h-5" />
-              {createdOrder.checkout_url ? `Pay ${createdOrder.order.customer_currency} ${createdOrder.order.customer_amount.toFixed(2)}` : 'Continue'}
+              {createdOrder.checkout_url ? `Pay ${formatBRL(createdOrder.order.customer_amount)}` : 'Continue'}
             </button>
 
             <p className="text-xs text-gray-400 mt-4 text-center">
@@ -401,11 +590,11 @@ export function RechargePage({ onOrderCreated, initialPhoneData }: Props) {
   );
 }
 
-function ReviewRow({ label, value }: { label: string; value: string }) {
+function ReviewRow({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
   return (
-    <div className="flex items-center justify-between py-2 border-b border-gray-100 last:border-0">
-      <span className="text-sm text-gray-500">{label}</span>
-      <span className="text-sm font-medium text-gray-900 text-right">{value}</span>
+    <div className={`flex items-center justify-between py-2 border-b border-gray-100 last:border-0 ${highlight ? 'bg-brand-50 -mx-2 px-2 rounded-lg' : ''}`}>
+      <span className={`text-sm ${highlight ? 'font-semibold text-gray-900' : 'text-gray-500'}`}>{label}</span>
+      <span className={`text-sm ${highlight ? 'font-bold text-brand-700 text-base' : 'font-medium text-gray-900'} text-right`}>{value}</span>
     </div>
   );
 }

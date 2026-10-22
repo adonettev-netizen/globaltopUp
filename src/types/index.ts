@@ -27,6 +27,29 @@ export interface RechargeProduct {
   operator: Operator;
 }
 
+export interface PricingQuote {
+  requested_amount_brl: number;
+  destination_currency: string;
+  exchange_rate_brl_to_dest: number;
+  exchange_rate_timestamp: string;
+  estimated_destination_amount: number;
+  matched_product: RechargeProduct & {
+    is_exact_match: boolean;
+    is_within_tolerance: boolean;
+    difference_from_requested: number;
+  };
+  customer_price_brl: number;
+  pricing_breakdown: {
+    provider_cost: number;
+    profit_margin_percent: number;
+    profit_amount: number;
+    exchange_rate: number;
+  };
+  alternatives: (RechargeProduct & { estimated_brl_cost: number })[];
+  minimum_brl: number;
+  maximum_brl: number;
+}
+
 export interface LookupResult {
   detected: boolean;
   message?: string;
@@ -105,5 +128,12 @@ export interface CreateOrderResponse {
     iso_code: string;
     calling_code: string;
     flag: string;
+  };
+  pricing: {
+    base_amount_brl: number;
+    exchange_rate: number;
+    exchange_rate_timestamp: string;
+    destination_amount: number;
+    destination_currency: string;
   };
 }

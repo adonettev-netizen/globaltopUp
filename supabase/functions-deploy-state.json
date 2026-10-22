@@ -1,0 +1,37 @@
+{
+  "projectId": "72247282",
+  "functions": {
+    "create-checkout": {
+      "hasChanged": false,
+      "hash": "1452a07ca885c76c8e0af521f23d61a475d1a1d96319b7c2932f642c3042adec"
+    },
+    "create-order": {
+      "hasChanged": false,
+      "hash": "78b4622651f3ed26b63f167a68167b6169595f353a0b62218d363b4a232d6bd8"
+    },
+    "dingconnect-sync": {
+      "hasChanged": false,
+      "hash": "892eaac6a7e6dadc2eb25641492372aaa516a8bda2eaaba99d11ea7b3ee766f0"
+    },
+    "lookup-operator": {
+      "hasChanged": false,
+      "hash": "2365b310711a73d533fd081409c33a354c99897e3599f8cf91f095e4a7d00207"
+    },
+    "mercado-pago-webhook": {
+      "hasChanged": false,
+      "hash": "50dec80881a5ab7ffdbafacaa834e53318f8f7538297d1c784ed88215940b757"
+    },
+    "order-status": {
+      "hasChanged": false,
+      "hash": "630934f696e183fca8a60a7b2c80a0e3dee7bb9b6d1db01bedce55c7b19bb285"
+    },
+    "stripe-webhook": {
+      "hasChanged": false,
+      "hash": "0a97e6b5c904bcbc5ba011025a8f4d1d219211a7fde377a8d68aeffda655eebb"
+    },
+    "pricing-quote": {
+      "hasChanged": false,
+      "hash": "bb0aa51a1964065500a1abccac407dfce424d23389bb82394584049048edabd7"
+    }
+  }
+}

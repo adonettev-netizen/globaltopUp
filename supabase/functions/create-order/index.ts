@@ -22,6 +22,41 @@ function genRef(): string {
   return ref;
 }
 
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+// In-memory rate cache
+let cachedRates: Record<string, number> | null = null;
+let cacheTime = 0;
+const CACHE_TTL_MS = 5 * 60 * 1000;
+
+async function fetchExchangeRates(): Promise<{ rates: Record<string, number>; timestamp: string }> {
+  if (cachedRates && Date.now() - cacheTime < CACHE_TTL_MS) {
+    return { rates: cachedRates!, timestamp: new Date().toISOString() };
+  }
+
+  try {
+    const res = await fetch("https://open.er-api.com/v6/latest/BRL");
+    if (res.ok) {
+      const data = await res.json();
+      if (data.rates) {
+        cachedRates = { ...data.rates, BRL: 1 };
+        cacheTime = Date.now();
+        return { rates: cachedRates!, timestamp: data.time_last_update_utc || new Date().toISOString() };
+      }
+    }
+  } catch (e) {
+    console.error("Exchange rate fetch failed:", e.message);
+  }
+
+  // Fallback static rates
+  const fallback = { BRL: 1, USD: 0.20, HTG: 13.5, EUR: 0.18 };
+  cachedRates = fallback;
+  cacheTime = Date.now();
+  return { rates: fallback, timestamp: new Date().toISOString() };
+}
+
 async function createStripeCheckoutSession(
   orderRef: string,
   accessToken: string,
@@ -64,7 +99,6 @@ async function createMercadoPagoPreference(
   orderRef: string,
   accessToken: string,
   amount: number,
-  currency: string,
   productName: string,
   recipientPhone: string,
 ): Promise<{ url: string } | { error: string }> {
@@ -80,12 +114,10 @@ async function createMercadoPagoPreference(
         title: `Recarga: ${productName} → ${recipientPhone}`,
         quantity: 1,
         unit_price: amount,
-        currency_id: currency === "BRL" ? "BRL" : "USD",
+        currency_id: "BRL",
       }],
       external_reference: orderRef,
-      payment_methods: currency === "BRL"
-        ? { installments: 1, default_payment_method_id: "pix" }
-        : undefined,
+      payment_methods: { installments: 1, default_payment_method_id: "pix" },
       back_urls: {
         success: `${siteUrl}/#/confirmation?ref=${orderRef}&token=${accessToken}`,
         failure: `${siteUrl}/#/track?ref=${orderRef}`,
@@ -128,14 +160,14 @@ Deno.serve(async (req: Request) => {
       country_id,
       operator_id,
       product_id,
+      amount_brl,
       payment_currency,
       payment_provider: requestedProvider,
       user_id,
     } = body;
 
-    // Validate required fields
-    if (!recipient_phone || !country_id || !product_id) {
-      return new Response(JSON.stringify({ error: "Missing required fields: recipient_phone, country_id, product_id" }), {
+    if (!recipient_phone || !country_id || !operator_id) {
+      return new Response(JSON.stringify({ error: "Missing required fields: recipient_phone, country_id, operator_id" }), {
         status: 400,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -143,62 +175,118 @@ Deno.serve(async (req: Request) => {
 
     const supabase = supabaseAdmin();
 
-    // Verify the product exists and belongs to the given operator/country
-    const { data: product, error: productErr } = await supabase
+    // Validate minimum amount
+    const { data: minConfig } = await supabase
+      .from("pricing_config")
+      .select("value")
+      .eq("key", "minimum_recharge_brl")
+      .maybeSingle();
+    const minAmount = minConfig ? parseFloat(minConfig.value) : 10.0;
+
+    const { data: maxConfig } = await supabase
+      .from("pricing_config")
+      .select("value")
+      .eq("key", "maximum_recharge_brl")
+      .maybeSingle();
+    const maxAmount = maxConfig ? parseFloat(maxConfig.value) : 500.0;
+
+    const brlAmount = parseFloat(amount_brl);
+    if (!brlAmount || brlAmount < minAmount) {
+      return new Response(JSON.stringify({ error: `Minimum recharge amount is R$ ${minAmount.toFixed(2)}` }), {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    if (brlAmount > maxAmount) {
+      return new Response(JSON.stringify({ error: `Maximum recharge amount is R$ ${maxAmount.toFixed(2)}` }), {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    // Load products for this operator
+    const { data: products, error: prodErr } = await supabase
+      .from("recharge_products")
+      .select("id, ding_product_code, product_name, local_amount, local_currency, wholesale_cost, is_active")
+      .eq("operator_id", operator_id)
+      .eq("is_active", true)
+      .order("local_amount", { ascending: true });
+
+    if (prodErr || !products || products.length === 0) {
+      return new Response(JSON.stringify({ error: "No recharge products available for this operator" }), {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    const destinationCurrency = products[0].local_currency;
+
+    // Fetch exchange rates
+    const { rates, timestamp: rateTimestamp } = await fetchExchangeRates();
+    const brlToDestRate = rates[destinationCurrency] || 1;
+    const destAmount = round2(brlAmount * brlToDestRate);
+
+    // Find closest matching product
+    let matchedProduct: any = null;
+    let bestDiff = Infinity;
+
+    for (const p of products) {
+      const diff = Math.abs(p.local_amount - destAmount);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        matchedProduct = p;
+      }
+    }
+
+    if (!matchedProduct) {
+      return new Response(JSON.stringify({ error: "No matching product found for the requested amount" }), {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    // Verify the matched product belongs to the correct operator and country
+    const { data: productVerify, error: productErr } = await supabase
       .from("recharge_products")
       .select(`
-        id,
-        ding_product_code,
-        product_name,
-        local_amount,
-        local_currency,
-        wholesale_cost,
-        is_active,
-        operator:operators!inner(
-          id,
-          name,
-          country_id,
-          country:countries!inner(name, iso_code, calling_code, flag)
-        )
+        id, ding_product_code, product_name, local_amount, local_currency, wholesale_cost,
+        operator:operators!inner(id, name, country_id, country:countries!inner(name, iso_code, calling_code, flag))
       `)
-      .eq("id", product_id)
+      .eq("id", matchedProduct.id)
       .eq("is_active", true)
       .maybeSingle();
 
-    if (productErr || !product) {
+    if (productErr || !productVerify) {
       return new Response(JSON.stringify({ error: "Invalid or unavailable recharge product" }), {
         status: 400,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    if (operator_id && product.operator.id !== operator_id) {
+    if (productVerify.operator.id !== operator_id) {
       return new Response(JSON.stringify({ error: "Product does not match the selected operator" }), {
         status: 400,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    // Determine payment provider — client can request a specific one,
-    // otherwise default based on currency/market
-    const requestedCurrency = (payment_currency || "USD").toUpperCase();
+    // Determine payment provider — BRL always uses Mercado Pago (PIX)
     const validProviders = ["stripe", "mercado_pago"];
     let provider: "stripe" | "mercado_pago";
     if (requestedProvider && validProviders.includes(requestedProvider)) {
       provider = requestedProvider as "stripe" | "mercado_pago";
-    } else if (requestedCurrency === "BRL") {
-      provider = "mercado_pago";
     } else {
-      provider = "stripe";
+      provider = "mercado_pago";
     }
 
-    // Mercado Pago only supports BRL — always compute in BRL when that provider is selected
-    const currency = provider === "mercado_pago" ? "BRL" : requestedCurrency;
+    // Always charge in BRL (base currency)
+    const checkoutCurrency = "BRL";
 
-    // Compute customer price server-side (never trust frontend amounts)
+    // Compute customer price server-side
     const { data: priceData, error: priceErr } = await supabase.rpc("compute_customer_price", {
-      p_product_id: product_id,
-      p_currency: currency,
+      p_product_id: matchedProduct.id,
+      p_currency: "BRL",
     });
 
     if (priceErr || priceData === null) {
@@ -209,6 +297,15 @@ Deno.serve(async (req: Request) => {
     }
 
     const customerAmount = Number(priceData);
+    const providerCost = matchedProduct.wholesale_cost || matchedProduct.local_amount;
+
+    // Get margin for storage
+    const { data: marginConfig } = await supabase
+      .from("pricing_config")
+      .select("value")
+      .eq("key", "profit_margin_percent")
+      .maybeSingle();
+    const margin = marginConfig ? parseFloat(marginConfig.value) : 8;
 
     // Generate unique order reference
     let orderRef = genRef();
@@ -224,15 +321,23 @@ Deno.serve(async (req: Request) => {
       attempts++;
     }
 
-    // Create the order
+    // Create the order with full pricing snapshot
     const insertPayload: any = {
       order_reference: orderRef,
       recipient_phone,
       country_id,
-      operator_id: product.operator.id,
-      product_id: product.id,
+      operator_id: productVerify.operator.id,
+      product_id: matchedProduct.id,
       customer_amount: customerAmount,
-      customer_currency: currency,
+      customer_currency: checkoutCurrency,
+      base_amount_brl: brlAmount,
+      exchange_rate: brlToDestRate,
+      exchange_rate_timestamp: rateTimestamp,
+      destination_amount: matchedProduct.local_amount,
+      destination_currency: destinationCurrency,
+      provider_cost: providerCost,
+      profit_margin_percent: margin,
+      service_fee: 0,
       payment_provider: provider,
       payment_status: "pending_payment",
       recharge_status: "pending",
@@ -260,17 +365,17 @@ Deno.serve(async (req: Request) => {
       order_id: order.id,
       provider,
       amount: customerAmount,
-      currency,
+      currency: checkoutCurrency,
       status: "pending",
     });
 
-    // Create checkout session with the payment provider
+    // Create checkout session
     let checkoutUrl: string | null = null;
     let checkoutError: string | null = null;
 
     if (provider === "stripe") {
       const result = await createStripeCheckoutSession(
-        orderRef, order.access_token, customerAmount, currency, product.product_name, recipient_phone,
+        orderRef, order.access_token, customerAmount, "BRL", matchedProduct.product_name, recipient_phone,
       );
       if ("url" in result) {
         checkoutUrl = result.url;
@@ -279,7 +384,7 @@ Deno.serve(async (req: Request) => {
       }
     } else if (provider === "mercado_pago") {
       const result = await createMercadoPagoPreference(
-        orderRef, order.access_token, customerAmount, currency, product.product_name, recipient_phone,
+        orderRef, order.access_token, customerAmount, matchedProduct.product_name, recipient_phone,
       );
       if ("url" in result) {
         checkoutUrl = result.url;
@@ -288,7 +393,6 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    // Return order details + checkout URL for redirect
     return new Response(JSON.stringify({
       success: true,
       order: {
@@ -297,7 +401,7 @@ Deno.serve(async (req: Request) => {
         access_token: order.access_token,
         recipient_phone,
         customer_amount: customerAmount,
-        customer_currency: currency,
+        customer_currency: checkoutCurrency,
         payment_provider: provider,
         payment_status: order.payment_status,
         recharge_status: order.recharge_status,
@@ -305,16 +409,23 @@ Deno.serve(async (req: Request) => {
       checkout_url: checkoutUrl,
       checkout_error: checkoutError,
       product: {
-        id: product.id,
-        product_name: product.product_name,
-        local_amount: product.local_amount,
-        local_currency: product.local_currency,
+        id: matchedProduct.id,
+        product_name: matchedProduct.product_name,
+        local_amount: matchedProduct.local_amount,
+        local_currency: matchedProduct.local_currency,
       },
       operator: {
-        id: product.operator.id,
-        name: product.operator.name,
+        id: productVerify.operator.id,
+        name: productVerify.operator.name,
       },
-      country: product.operator.country,
+      country: productVerify.operator.country,
+      pricing: {
+        base_amount_brl: brlAmount,
+        exchange_rate: brlToDestRate,
+        exchange_rate_timestamp: rateTimestamp,
+        destination_amount: matchedProduct.local_amount,
+        destination_currency: destinationCurrency,
+      },
     }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
