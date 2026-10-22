@@ -51,37 +51,95 @@ async function dingFetch(path: string): Promise<any> {
 }
 
 /**
- * DingConnect GetAccountLookup returns an AccountLookup object directly
- * (not wrapped in Items), containing ProviderCode, CountryCode, RegionCode.
- * Per the official FAQ: for non-valid/incomplete numbers, the API still
- * returns a result but it may default to the first provider for the
- * detected country — so this is an ESTIMATE, not authoritative.
- * We surface it as a "suggested" operator and always show the full list
- * for manual selection.
+ * DingConnect GetAccountLookup returns ProviderCode, CountryCode, RegionCode.
+ * ResultCode 1 = estimate (not confirmed). The API may not work in UAT/sandbox.
  */
 async function lookupOperator(accountNumber: string): Promise<{
   providerCode: string | null;
   countryCode: string | null;
   isEstimate: boolean;
   error: string | null;
-  rawResponse?: any;
 }> {
   try {
     const data = await dingFetch(`/GetAccountLookup?accountNumber=${encodeURIComponent(accountNumber)}`);
-
-    // Response fields are PascalCase: ProviderCode, CountryCode, RegionCode, ResultCode
     const providerCode = data.ProviderCode || data.providerCode || null;
     const countryCode = data.CountryCode || data.countryCode || null;
     const resultCode = data.ResultCode ?? data.resultCode;
-
-    // ResultCode 1 means "not sure about the products for the account"
-    // — the provider returned is an estimate, not confirmed
     const isEstimate = resultCode === 1 || !providerCode;
-
-    return { providerCode, countryCode, isEstimate, error: null, rawResponse: data };
+    return { providerCode, countryCode, isEstimate, error: null };
   } catch (e) {
     return { providerCode: null, countryCode: null, isEstimate: true, error: e.message };
   }
+}
+
+/**
+ * NANP (North American Numbering Plan) area code ranges.
+ * All these countries share calling code +1, so we disambiguate by
+ * the 3-digit area code (the first 3 digits of the national number).
+ *
+ * Source: https://en.wikipedia.org/wiki/List_of_North_American_Numbering_Plan_area_codes
+ */
+const NANP_AREA_CODE_RANGES: { iso: string; ranges: [number, number][] }[] = [
+  { iso: "US", ranges: [
+    [201, 289], [290, 299], [300, 389], [400, 489], [500, 589],
+    [600, 689], [700, 789], [800, 879], [881, 889], [900, 999],
+  ]},
+  // Jamaica: 658, 876
+  { iso: "JM", ranges: [[658, 658], [876, 876]] },
+  // Canada: specific area codes
+  { iso: "CA", ranges: [
+    [204, 204], [226, 226], [236, 236], [249, 249], [250, 250],
+    [263, 263], [289, 289], [306, 306], [343, 343], [354, 354],
+    [365, 365], [367, 367], [368, 368], [403, 403], [416, 416],
+    [418, 418], [428, 428], [431, 431], [437, 437], [438, 438],
+    [450, 450], [468, 468], [474, 474], [506, 506], [514, 514],
+    [519, 519], [548, 548], [579, 579], [581, 581], [584, 584],
+    [587, 587], [604, 604], [613, 613], [639, 639], [647, 647],
+    [672, 672], [682, 682], [705, 705], [709, 709], [742, 742],
+    [753, 753], [778, 778], [780, 780], [782, 782], [807, 807],
+    [819, 819], [825, 825], [867, 867], [873, 873], [879, 879],
+    [902, 902], [905, 905], [939, 939],
+  ]},
+  // Dominican Republic: 809, 829, 849
+  { iso: "DO", ranges: [[809, 809], [829, 829], [849, 849]] },
+  // Puerto Rico: 787, 939
+  { iso: "PR", ranges: [[787, 787], [939, 939]] },
+  // Trinidad & Tobago: 868
+  { iso: "TT", ranges: [[868, 868]] },
+  // Barbados: 246
+  { iso: "BB", ranges: [[246, 246]] },
+  // Bahamas: 242
+  { iso: "BS", ranges: [[242, 242]] },
+  // Grenada: 473
+  { iso: "GD", ranges: [[473, 473]] },
+  // Jamaica already above
+  // Antigua: 268
+  { iso: "AG", ranges: [[268, 268]] },
+  // Dominica: 767
+  { iso: "DM", ranges: [[767, 767]] },
+  // St. Lucia: 758
+  { iso: "LC", ranges: [[758, 758]] },
+  // St. Vincent: 784
+  { iso: "VC", ranges: [[784, 784]] },
+  // St. Kitts: 869
+  { iso: "KN", ranges: [[869, 869]] },
+  // Cayman Islands: 345
+  { iso: "KY", ranges: [[345, 345]] },
+  // Bermuda: 441
+  { iso: "BM", ranges: [[441, 441]] },
+  // Guyana: 592
+  { iso: "GY", ranges: [[592, 592]] },
+  // Suriname: 597
+  { iso: "SR", ranges: [[597, 597]] },
+];
+
+function resolveNanpCountry(areaCode: number): string | null {
+  for (const entry of NANP_AREA_CODE_RANGES) {
+    for (const [lo, hi] of entry.ranges) {
+      if (areaCode >= lo && areaCode <= hi) return entry.iso;
+    }
+  }
+  return null;
 }
 
 Deno.serve(async (req: Request) => {
@@ -91,8 +149,10 @@ Deno.serve(async (req: Request) => {
 
   try {
     const url = new URL(req.url);
-    // Normalize: strip everything except digits and leading +
     const rawPhone = (url.searchParams.get("phone") || "").trim();
+    const explicitCountryIso = (url.searchParams.get("country_iso") || "").trim().toUpperCase();
+
+    // Normalize: keep digits and leading +
     const phone = rawPhone.replace(/[^0-9+]/g, "");
 
     if (!phone || phone.replace("+", "").length < 2) {
@@ -105,10 +165,9 @@ Deno.serve(async (req: Request) => {
     }
 
     const supabase = supabaseAdmin();
-    const normalized = phone.replace(/^\+/, "");
-    const digitsOnly = normalized;
+    const digitsOnly = phone.replace(/^\+/, "");
 
-    // Load all supported countries with calling codes
+    // Load all supported countries
     const { data: countries } = await supabase
       .from("countries")
       .select("id, ding_country_code, name, iso_code, calling_code, flag")
@@ -125,34 +184,71 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    // Longest-prefix match on calling code
-    let matchedCountry: any = null;
-    let bestLen = 0;
+    // Build lookup maps
+    const countryByIso: Record<string, any> = {};
     for (const c of countries) {
-      const cc = (c.calling_code || "").replace(/[^0-9]/g, "");
-      if (cc && digitsOnly.startsWith(cc) && cc.length > bestLen) {
-        matchedCountry = c;
-        bestLen = cc.length;
+      if (c.iso_code) countryByIso[c.iso_code.toUpperCase()] = c;
+    }
+
+    // If an explicit country ISO is provided, validate and use it
+    let matchedCountry: any = null;
+    let nationalNumber = "";
+    let detectionSource: "explicit" | "nanp_area_code" | "calling_code" = "calling_code";
+
+    if (explicitCountryIso && countryByIso[explicitCountryIso]) {
+      matchedCountry = countryByIso[explicitCountryIso];
+      const cc = (matchedCountry.calling_code || "").replace(/[^0-9]/g, "");
+      // Strip the calling code prefix if present
+      if (cc && digitsOnly.startsWith(cc)) {
+        nationalNumber = digitsOnly.slice(cc.length);
+      } else {
+        nationalNumber = digitsOnly;
+      }
+      detectionSource = "explicit";
+    } else {
+      // Auto-detect via longest-prefix match on calling code
+      let bestLen = 0;
+      for (const c of countries) {
+        const cc = (c.calling_code || "").replace(/[^0-9]/g, "");
+        if (cc && digitsOnly.startsWith(cc) && cc.length > bestLen) {
+          matchedCountry = c;
+          bestLen = cc.length;
+        }
+      }
+
+      if (!matchedCountry) {
+        return new Response(JSON.stringify({
+          detected: false,
+          message: "Could not identify the destination country from this phone number. Please select the country manually.",
+        }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      nationalNumber = digitsOnly.slice(bestLen);
+
+      // NANP disambiguation: if calling code is 1, use area code to determine the real country
+      if (bestLen === 1 && nationalNumber.length >= 3) {
+        const areaCode = parseInt(nationalNumber.slice(0, 3), 10);
+        if (!isNaN(areaCode)) {
+          const nanpIso = resolveNanpCountry(areaCode);
+          if (nanpIso && countryByIso[nanpIso] && countryByIso[nanpIso].id !== matchedCountry.id) {
+            matchedCountry = countryByIso[nanpIso];
+            detectionSource = "nanp_area_code";
+          } else if (nanpIso && countryByIso[nanpIso]) {
+            // Already the right country, just confirm
+            detectionSource = "nanp_area_code";
+          }
+        }
       }
     }
 
-    if (!matchedCountry) {
-      return new Response(JSON.stringify({
-        detected: false,
-        message: "Could not identify the destination country from this phone number. Please include the country code (e.g. +509 for Haiti).",
-      }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
-    const nationalNumber = digitsOnly.slice(bestLen);
-
-    // For +1 (NANP), we need at least 4 digits of the national number to disambiguate
-    // For other countries, 2 digits is enough to show the country
-    const minNationalForOperators = bestLen === 1 ? 4 : 2;
+    // For +1 (NANP), need at least 4 national digits. For others, 2.
+    const callingCodeDigits = (matchedCountry.calling_code || "").replace(/[^0-9]/g, "").length;
+    const minNationalForOperators = callingCodeDigits === 1 ? 4 : 2;
     const hasEnoughDigits = nationalNumber.length >= minNationalForOperators;
 
-    // Get operators for the matched country from DB
+    // Get operators for the matched country
     const { data: providers } = await supabase
       .from("operators")
       .select("id, ding_operator_code, name, logo_url")
@@ -162,7 +258,7 @@ Deno.serve(async (req: Request) => {
 
     const operators = providers || [];
 
-    // Attempt operator detection only when we have enough digits
+    // Attempt DingConnect operator detection
     let detectedOperator: any = null;
     let operatorDetectionMethod: "none" | "estimate" | "confirmed" = "none";
     let lookupError: string | null = null;
@@ -176,15 +272,11 @@ Deno.serve(async (req: Request) => {
       }
 
       if (lookup.providerCode) {
-        // Match the DingConnect ProviderCode against our operators
         detectedOperator = operators.find(
           (p: any) => p.ding_operator_code === lookup.providerCode
         ) || null;
 
         if (detectedOperator) {
-          // Per DingConnect FAQ, GetAccountLookup is an estimate for
-          // non-validated numbers. Only mark "confirmed" if the API
-          // explicitly validated (ResultCode !== 1).
           operatorDetectionMethod = lookup.isEstimate ? "estimate" : "confirmed";
         }
       }
@@ -207,7 +299,7 @@ Deno.serve(async (req: Request) => {
       auto_detected: detectedOperator !== null,
       lookup_error: lookupError,
       needs_more_digits: !hasEnoughDigits,
-      _debug_lookup: lookup.providerCode ? { providerCode: lookup.providerCode, countryCode: lookup.countryCode, isEstimate: lookup.isEstimate } : { raw: lookup.rawResponse, error: lookup.error },
+      detection_source: detectionSource,
     }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });

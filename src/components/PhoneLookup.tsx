@@ -1,7 +1,7 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { Search, Loader2, MapPin, Phone, AlertCircle, Info, ShieldCheck, HelpCircle } from 'lucide-react';
-import { callEdgeFunction } from '@/lib/supabase';
-import type { LookupResult, Operator } from '@/types';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { Search, Loader2, MapPin, Phone, AlertCircle, Info, ShieldCheck, HelpCircle, ChevronDown, Check } from 'lucide-react';
+import { supabase, callEdgeFunction } from '@/lib/supabase';
+import type { LookupResult, Operator, CountryOption } from '@/types';
 
 interface Props {
   onContinue: (data: {
@@ -12,6 +12,44 @@ interface Props {
   }) => void;
 }
 
+// Common flag emojis by ISO code (for countries that don't have flags in the DB)
+const FLAG_EMOJIS: Record<string, string> = {
+  US: '🇺🇸', CA: '🇨🇦', GB: '🇬🇧', BR: '🇧🇷', HT: '🇭🇹', JM: '🇯🇲',
+  DO: '🇩🇴', MX: '🇲🇽', ES: '🇪🇸', CO: '🇨🇴', AR: '🇦🇷', CL: '🇨🇱',
+  PE: '🇵🇪', EC: '🇪🇨', BO: '🇧🇴', PY: '🇵🇾', UY: '🇺🇾', VE: '🇻🇪',
+  GT: '🇬🇹', HN: '🇭🇳', SV: '🇸🇻', NI: '🇳🇮', CR: '🇨🇷', PA: '🇵🇦',
+  CU: '🇨🇺', FR: '🇫🇷', DE: '🇩🇪', IT: '🇮🇹', PT: '🇵🇹', NL: '🇳🇱',
+  PR: '🇵🇷', TT: '🇹🇹', BS: '🇧🇸', BB: '🇧🇧', GD: '🇬🇩', KY: '🇰🇾',
+  BM: '🇧🇲', AG: '🇦🇬', DM: '🇩🇲', LC: '🇱🇨', VC: '🇻🇨', KN: '🇰🇳',
+  GY: '🇬🇾', SR: '🇸🇷', BZ: '🇧🇿', AU: '🇦🇺', NZ: '🇳🇿', IN: '🇮🇳',
+  NG: '🇳🇬', KE: '🇰🇪', GH: '🇬🇭', ZA: '🇿🇦', EG: '🇪🇬', MA: '🇲🇦',
+  PK: '🇵🇰', BD: '🇧🇩', PH: '🇵🇭', VN: '🇻🇳', TH: '🇹🇭', ID: '🇮🇩',
+  MY: '🇲🇾', SG: '🇸🇬', AE: '🇦🇪', SA: '🇸🇦', KW: '🇰🇼', QA: '🇶🇦',
+  OM: '🇴🇲', BH: '🇧🇭', JO: '🇯🇴', LB: '🇱🇧', IQ: '🇮🇶', IR: '🇮🇷',
+  TR: '🇹🇷', RU: '🇷🇺', UA: '🇺🇦', PL: '🇵🇱', RO: '🇷🇴', BE: '🇧🇪',
+  IE: '🇮🇪', CH: '🇨🇭', AT: '🇦🇹', SE: '🇸🇪', NO: '🇳🇴', DK: '🇩🇰',
+  FI: '🇫🇮', CZ: '🇨🇿', HU: '🇭🇺', GR: '🇬🇷', BG: '🇧🇬', HR: '🇭🇷',
+  SK: '🇸🇰', SI: '🇸🇮', LT: '🇱🇹', LV: '🇱🇻', EE: '🇪🇪', IS: '🇮🇸',
+  LU: '🇱🇺', MT: '🇲🇹', CY: '🇨🇾', AL: '🇦🇱', BA: '🇧🇦', RS: '🇷🇸',
+  ME: '🇲🇪', MK: '🇲🇰', MD: '🇲🇩', BY: '🇧🇾', GE: '🇬🇪', AM: '🇦🇲',
+  AZ: '🇦🇿', KZ: '🇰🇿', UZ: '🇺🇿', KG: '🇰🇬', TJ: '🇹🇯', TM: '🇹🇲',
+  AF: '🇦🇫', CN: '🇨🇳', JP: '🇯🇵', KR: '🇰🇷', TW: '🇹🇼', HK: '🇭🇰',
+  KH: '🇰🇭', LA: '🇱🇦', MM: '🇲🇲', NP: '🇳🇵', LK: '🇱🇰', MV: '🇲🇻',
+  BN: '🇧🇳', TL: '🇹🇱', KP: '🇰🇵', MN: '🇲🇳', BT: '🇧🇹',
+};
+
+function getFlag(iso: string, dbFlag: string | null): string {
+  if (dbFlag) return dbFlag;
+  if (FLAG_EMOJIS[iso]) return FLAG_EMOJIS[iso];
+  // Generate regional indicator symbols from ISO code
+  if (iso.length === 2) {
+    const A = 0x1F1E6;
+    return String.fromCodePoint(A + iso.charCodeAt(0) - 65) +
+           String.fromCodePoint(A + iso.charCodeAt(1) - 65);
+  }
+  return '🌍';
+}
+
 export function PhoneLookup({ onContinue }: Props) {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -19,10 +57,59 @@ export function PhoneLookup({ onContinue }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [selectedOperator, setSelectedOperator] = useState<Operator | null>(null);
   const [showOperators, setShowOperators] = useState(false);
+
+  // Country selector state
+  const [countries, setCountries] = useState<CountryOption[]>([]);
+  const [selectedCountry, setSelectedCountry] = useState<CountryOption | null>(null);
+  const [showCountryDropdown, setShowCountryDropdown] = useState(false);
+  const [countrySearch, setCountrySearch] = useState('');
+  const countryDropdownRef = useRef<HTMLDivElement>(null);
+
   const debounceRef = useRef<ReturnType<typeof setTimeout>>();
   const requestIdRef = useRef(0);
 
-  const lookup = useCallback(async (phone: string) => {
+  // Load countries from Supabase on mount
+  useEffect(() => {
+    (async () => {
+      const { data, error } = await supabase
+        .from('countries')
+        .select('id, iso_code, name, calling_code, flag')
+        .eq('is_supported', true)
+        .order('name');
+
+      if (!error && data) {
+        const opts = (data as CountryOption[]).map(c => ({
+          ...c,
+          flag: getFlag(c.iso_code, c.flag),
+        }));
+        setCountries(opts);
+      }
+    })();
+  }, []);
+
+  // Close country dropdown on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (countryDropdownRef.current && !countryDropdownRef.current.contains(e.target as Node)) {
+        setShowCountryDropdown(false);
+        setCountrySearch('');
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const filteredCountries = useMemo(() => {
+    if (!countrySearch) return countries;
+    const q = countrySearch.toLowerCase();
+    return countries.filter(c =>
+      c.name.toLowerCase().includes(q) ||
+      c.iso_code.toLowerCase().includes(q) ||
+      c.calling_code.includes(q)
+    );
+  }, [countries, countrySearch]);
+
+  const lookup = useCallback(async (phone: string, countryIso?: string) => {
     const currentRequestId = ++requestIdRef.current;
     const digits = phone.replace(/[^0-9+]/g, '').replace('+', '');
 
@@ -36,12 +123,14 @@ export function PhoneLookup({ onContinue }: Props) {
     setLoading(true);
     setError(null);
 
+    const params: Record<string, string> = { phone };
+    if (countryIso) params.country_iso = countryIso;
+
     const { data, error: fnError } = await callEdgeFunction<LookupResult>('lookup-operator', {
       method: 'GET',
-      params: { phone },
+      params,
     });
 
-    // Stale response check — ignore if a newer request was fired
     if (currentRequestId !== requestIdRef.current) return;
 
     setLoading(false);
@@ -54,6 +143,11 @@ export function PhoneLookup({ onContinue }: Props) {
 
     if (data) {
       setResult(data);
+      // Sync selected country with the detected/confirmed country
+      if (data.country) {
+        const matched = countries.find(c => c.iso_code === data.country!.iso_code);
+        if (matched) setSelectedCountry(matched);
+      }
       if (data.detected_operator && data.operator_detection_method !== 'none') {
         setSelectedOperator(data.detected_operator);
       } else {
@@ -63,20 +157,40 @@ export function PhoneLookup({ onContinue }: Props) {
         setShowOperators(true);
       }
     }
-  }, []);
+  }, [countries]);
 
   const handleInput = (value: string) => {
     setInput(value);
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    // Reset state immediately on new input
     setError(null);
-    if (value.replace(/[^0-9+]/g, '').replace('+', '').length < 2) {
+    const digits = value.replace(/[^0-9+]/g, '').replace('+', '');
+    if (digits.length < 2) {
       setResult(null);
       setLoading(false);
       requestIdRef.current++;
       return;
     }
-    debounceRef.current = setTimeout(() => lookup(value), 600);
+    debounceRef.current = setTimeout(
+      () => lookup(value, selectedCountry?.iso_code),
+      600
+    );
+  };
+
+  const handleCountrySelect = (country: CountryOption) => {
+    setSelectedCountry(country);
+    setShowCountryDropdown(false);
+    setCountrySearch('');
+    setError(null);
+
+    // Re-run lookup with the explicit country
+    if (input.replace(/[^0-9+]/g, '').replace('+', '').length >= 2) {
+      lookup(input, country.iso_code);
+    } else {
+      // Pre-fill the calling code if input is empty
+      if (!input) {
+        setInput('+' + country.calling_code);
+      }
+    }
   };
 
   useEffect(() => {
@@ -109,6 +223,73 @@ export function PhoneLookup({ onContinue }: Props) {
 
   return (
     <div className="w-full">
+      {/* Country selector */}
+      <div className="mb-4">
+        <label className="block text-sm font-semibold text-gray-700 mb-2">
+          Destination country
+        </label>
+        <div className="relative" ref={countryDropdownRef}>
+          <button
+            onClick={() => setShowCountryDropdown(!showCountryDropdown)}
+            className="w-full flex items-center gap-3 p-4 bg-white rounded-2xl border-2 border-gray-200 hover:border-brand-300 transition-all text-left"
+          >
+            {selectedCountry ? (
+              <>
+                <span className="text-2xl">{selectedCountry.flag}</span>
+                <div className="flex-1">
+                  <p className="font-semibold text-gray-900">{selectedCountry.name}</p>
+                  <p className="text-sm text-gray-500">+{selectedCountry.calling_code}</p>
+                </div>
+              </>
+            ) : (
+              <>
+                <MapPin className="w-5 h-5 text-gray-400" />
+                <span className="flex-1 text-gray-500">Select destination country</span>
+              </>
+            )}
+            <ChevronDown className={`w-5 h-5 text-gray-400 transition-transform ${showCountryDropdown ? 'rotate-180' : ''}`} />
+          </button>
+
+          {showCountryDropdown && (
+            <div className="absolute z-50 w-full mt-2 bg-white rounded-2xl shadow-xl border border-gray-100 max-h-72 overflow-hidden flex flex-col animate-fade-in">
+              <div className="p-3 border-b border-gray-100">
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                  <input
+                    type="text"
+                    value={countrySearch}
+                    onChange={(e) => setCountrySearch(e.target.value)}
+                    placeholder="Search country or code..."
+                    className="w-full pl-10 pr-3 py-2 rounded-lg bg-gray-50 text-sm outline-none focus:bg-white focus:ring-2 focus:ring-brand-200"
+                    autoFocus
+                  />
+                </div>
+              </div>
+              <div className="overflow-y-auto flex-1">
+                {filteredCountries.map((c) => (
+                  <button
+                    key={c.id}
+                    onClick={() => handleCountrySelect(c)}
+                    className={`w-full flex items-center gap-3 px-4 py-3 hover:bg-brand-50 transition-colors text-left ${
+                      selectedCountry?.id === c.id ? 'bg-brand-50' : ''
+                    }`}
+                  >
+                    <span className="text-xl">{c.flag}</span>
+                    <span className="flex-1 font-medium text-gray-900">{c.name}</span>
+                    <span className="text-sm text-gray-500">+{c.calling_code}</span>
+                    {selectedCountry?.id === c.id && <Check className="w-4 h-4 text-brand-600" />}
+                  </button>
+                ))}
+                {filteredCountries.length === 0 && (
+                  <div className="p-4 text-center text-sm text-gray-500">No countries found</div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Phone input */}
       <div className="relative">
         <div className={`flex items-center gap-3 p-4 bg-white rounded-2xl border-2 transition-all ${
           error ? 'border-red-300' :
@@ -121,9 +302,9 @@ export function PhoneLookup({ onContinue }: Props) {
             inputMode="tel"
             value={input}
             onChange={(e) => handleInput(e.target.value)}
-            placeholder="Enter recipient number, e.g. +509 3..."
+            placeholder={selectedCountry ? `+${selectedCountry.calling_code} ...` : 'Select a country first, then enter number'}
             className="flex-1 text-lg font-medium outline-none bg-transparent placeholder:text-gray-400 placeholder:font-normal"
-            autoFocus
+            autoFocus={!selectedCountry}
           />
           {loading && <Loader2 className="w-5 h-5 text-brand-500 animate-spin flex-shrink-0" />}
           {!loading && input && (
@@ -156,6 +337,12 @@ export function PhoneLookup({ onContinue }: Props) {
                 <MapPin className="w-4 h-4 text-accent-600" />
                 <span className="font-semibold text-gray-900">{result.country.name}</span>
                 <span className="text-sm text-gray-500">+{result.country.calling_code}</span>
+                {result.detection_source === 'explicit' && (
+                  <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full font-medium">Selected</span>
+                )}
+                {result.detection_source === 'nanp_area_code' && (
+                  <span className="text-xs bg-accent-100 text-accent-700 px-2 py-0.5 rounded-full font-medium">Area code match</span>
+                )}
               </div>
               <p className="text-sm text-gray-600 mt-0.5">
                 {result.full_number}
@@ -225,7 +412,7 @@ export function PhoneLookup({ onContinue }: Props) {
                 </div>
               )}
 
-              {/* Operator list — shown when manual selection needed or user clicked Change */}
+              {/* Operator list */}
               {(showOperators || (!result.auto_detected && result.operators.length > 0)) && (
                 <div className="mt-2 space-y-2">
                   <p className="text-xs font-medium text-gray-500 px-1">
@@ -298,7 +485,7 @@ export function PhoneLookup({ onContinue }: Props) {
             <div>
               <p className="text-sm text-red-800">{error}</p>
               <button
-                onClick={() => lookup(input)}
+                onClick={() => lookup(input, selectedCountry?.iso_code)}
                 className="text-sm text-red-700 font-medium underline mt-2"
               >
                 Try again
@@ -309,10 +496,10 @@ export function PhoneLookup({ onContinue }: Props) {
       )}
 
       {/* Empty hint */}
-      {!input && !loading && (
+      {!input && !loading && !selectedCountry && (
         <div className="mt-3 flex items-center gap-2 text-sm text-gray-400">
           <Search className="w-4 h-4" />
-          <span>Try entering a country code like 509 (Haiti) or 55 (Brazil)</span>
+          <span>Select a country above, then enter the recipient's number</span>
         </div>
       )}
     </div>

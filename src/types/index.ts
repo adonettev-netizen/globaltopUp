@@ -68,6 +68,15 @@ export interface LookupResult {
   operator_detection_method?: 'none' | 'estimate' | 'confirmed';
   lookup_error?: string | null;
   needs_more_digits?: boolean;
+  detection_source?: 'explicit' | 'nanp_area_code' | 'calling_code';
+}
+
+export interface CountryOption {
+  id: string;
+  iso_code: string;
+  name: string;
+  calling_code: string;
+  flag: string | null;
 }
 
 export interface Order {
