@@ -64,6 +64,7 @@ async function lookupOperator(accountNumber: string): Promise<{
   countryCode: string | null;
   isEstimate: boolean;
   error: string | null;
+  rawResponse?: any;
 }> {
   try {
     const data = await dingFetch(`/GetAccountLookup?accountNumber=${encodeURIComponent(accountNumber)}`);
@@ -77,7 +78,7 @@ async function lookupOperator(accountNumber: string): Promise<{
     // — the provider returned is an estimate, not confirmed
     const isEstimate = resultCode === 1 || !providerCode;
 
-    return { providerCode, countryCode, isEstimate, error: null };
+    return { providerCode, countryCode, isEstimate, error: null, rawResponse: data };
   } catch (e) {
     return { providerCode: null, countryCode: null, isEstimate: true, error: e.message };
   }
@@ -206,6 +207,7 @@ Deno.serve(async (req: Request) => {
       auto_detected: detectedOperator !== null,
       lookup_error: lookupError,
       needs_more_digits: !hasEnoughDigits,
+      _debug_lookup: lookup.providerCode ? { providerCode: lookup.providerCode, countryCode: lookup.countryCode, isEstimate: lookup.isEstimate } : { raw: lookup.rawResponse, error: lookup.error },
     }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });

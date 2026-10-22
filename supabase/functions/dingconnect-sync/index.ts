@@ -81,30 +81,29 @@ async function parallelMap<T, R>(items: T[], concurrency: number, fn: (item: T) 
 }
 
 interface DingCountry {
-  CountryCode: string;
+  CountryIso: string;
   CountryName: string;
-  CountryIso?: string;
-  CountryIso3?: string;
-  CallingCode?: string;
-  IsoCode?: string;
+  InternationalDialingInformation?: { Prefix: string; MinimumLength: number; MaximumLength: number }[];
+  RegionCodes?: string[];
 }
 
 interface DingProvider {
   ProviderCode: string;
-  ProviderName: string;
+  Name?: string;
   CountryIso?: string;
-  CountryCode?: string;
-  ProviderLogoUrl?: string | null;
+  LogoUrl?: string | null;
+  ValidationRegex?: string;
+  PaymentTypes?: string[];
 }
 
 interface DingProduct {
   ProductCode: string;
   ProviderCode: string;
+  Name?: string;
   ProductName?: string;
   LocalAmount: number;
   LocalCurrency: string;
   WholesalePrice?: number | null;
-  WholesaleAmount?: number | null;
   UatNumber?: string | null;
 }
 
@@ -117,14 +116,18 @@ async function syncCountries(supabase: any): Promise<{ count: number; error: str
       return { count: 0, error: "GetCountries returned 0 items — check API key permissions" };
     }
 
-    const rows = items.map((c) => ({
-      ding_country_code: c.CountryCode,
-      name: c.CountryName,
-      iso_code: c.CountryIso || c.CountryIso3 || null,
-      calling_code: c.CallingCode || c.IsoCode || "",
-      is_supported: true,
-      last_synced_at: new Date().toISOString(),
-    }));
+    const rows = items.map((c) => {
+      // Extract calling code from InternationalDialingInformation array
+      const callingCode = c.InternationalDialingInformation?.[0]?.Prefix || "";
+      return {
+        ding_country_code: c.CountryIso,
+        name: c.CountryName,
+        iso_code: c.CountryIso,
+        calling_code: callingCode,
+        is_supported: true,
+        last_synced_at: new Date().toISOString(),
+      };
+    });
 
     const { error } = await supabase
       .from("countries")
@@ -135,7 +138,7 @@ async function syncCountries(supabase: any): Promise<{ count: number; error: str
     }
 
     // Mark countries no longer returned as unsupported (without deleting — preserve orders)
-    const returnedCodes = items.map((c) => c.CountryCode);
+    const returnedCodes = items.map((c) => c.CountryIso);
     await supabase
       .from("countries")
       .update({ is_supported: false })
@@ -150,7 +153,6 @@ async function syncCountries(supabase: any): Promise<{ count: number; error: str
 async function syncProviders(supabase: any): Promise<{ count: number; error: string | null }> {
   try {
     // GetProviders returns ALL providers at once — no country filter parameter.
-    // Each provider has a CountryIso field linking it to its country.
     const data = await dingFetch("/GetProviders");
     const items: DingProvider[] = extractItems(data);
 
@@ -186,11 +188,12 @@ async function syncProviders(supabase: any): Promise<{ count: number; error: str
         continue;
       }
 
+      const providerName = p.Name || p.ProviderCode;
       allProviders.push({
         ding_operator_code: p.ProviderCode,
         country_id: countryMatch.id,
-        name: p.ProviderName,
-        logo_url: p.ProviderLogoUrl || null,
+        name: providerName,
+        logo_url: p.LogoUrl || null,
         is_active: true,
         last_synced_at: new Date().toISOString(),
       });
@@ -243,10 +246,10 @@ async function syncProducts(supabase: any): Promise<{ count: number; error: stri
           allProducts.push({
             ding_product_code: p.ProductCode,
             operator_id: provider.id,
-            product_name: p.ProductName || `${p.LocalCurrency} ${p.LocalAmount}`,
+            product_name: p.Name || p.ProductName || `${p.LocalCurrency} ${p.LocalAmount}`,
             local_amount: p.LocalAmount,
             local_currency: p.LocalCurrency,
-            wholesale_cost: p.WholesalePrice ?? p.WholesaleAmount ?? null,
+            wholesale_cost: p.WholesalePrice ?? null,
             is_active: true,
             last_synced_at: new Date().toISOString(),
           });
@@ -289,6 +292,36 @@ Deno.serve(async (req: Request) => {
     const supabase = supabaseAdmin();
     const url = new URL(req.url);
     const entity = url.searchParams.get("entity") || "full";
+    const debug = url.searchParams.get("debug") === "true";
+
+    // Debug mode: return raw API response for inspection
+    if (debug) {
+      const debugCountry = url.searchParams.get("country")?.toUpperCase();
+      const raw: Record<string, any> = {};
+      if (entity === "countries" || entity === "full") {
+        raw.countries = await dingFetch("/GetCountries");
+      }
+      if (entity === "operators" || entity === "full") {
+        raw.providers = await dingFetch("/GetProviders");
+      }
+      const summary: Record<string, any> = {};
+      for (const [key, val] of Object.entries(raw)) {
+        const items = (val as any)?.Items || (val as any)?.items || [];
+        const filtered = debugCountry && key === "providers"
+          ? items.filter((p: any) => p.CountryIso === debugCountry)
+          : items;
+        summary[key] = {
+          resultCode: (val as any)?.ResultCode,
+          totalItems: items.length,
+          filteredCount: filtered.length,
+          first5: filtered.slice(0, 5),
+          fieldNames: items.length > 0 ? Object.keys(items[0]) : [],
+        };
+      }
+      return new Response(JSON.stringify(summary, null, 2), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
 
     const { data: log } = await supabase
       .from("sync_logs")

@@ -11,11 +11,11 @@
     },
     "dingconnect-sync": {
       "hasChanged": false,
-      "hash": "892eaac6a7e6dadc2eb25641492372aaa516a8bda2eaaba99d11ea7b3ee766f0"
+      "hash": "45c308d172d1114e3d5ffcb4f022d970717384eb0cc42427457325cc0fbbec49"
     },
     "lookup-operator": {
       "hasChanged": false,
-      "hash": "2365b310711a73d533fd081409c33a354c99897e3599f8cf91f095e4a7d00207"
+      "hash": "e16e617c1c8b3a4139f0cecad331ee93de2c544d8481834c5561b91d58fc357a"
     },
     "mercado-pago-webhook": {
       "hasChanged": false,
@@ -25,13 +25,13 @@
       "hasChanged": false,
       "hash": "630934f696e183fca8a60a7b2c80a0e3dee7bb9b6d1db01bedce55c7b19bb285"
     },
-    "stripe-webhook": {
-      "hasChanged": false,
-      "hash": "0a97e6b5c904bcbc5ba011025a8f4d1d219211a7fde377a8d68aeffda655eebb"
-    },
     "pricing-quote": {
       "hasChanged": false,
       "hash": "bb0aa51a1964065500a1abccac407dfce424d23389bb82394584049048edabd7"
+    },
+    "stripe-webhook": {
+      "hasChanged": false,
+      "hash": "0a97e6b5c904bcbc5ba011025a8f4d1d219211a7fde377a8d68aeffda655eebb"
     }
   }
 }
