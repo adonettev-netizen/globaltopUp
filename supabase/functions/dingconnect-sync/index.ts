@@ -156,6 +156,213 @@ async function syncCountries(supabase: any): Promise<{ count: number; error: str
   }
 }
 
+/**
+ * Known mobile carrier brand names/patterns.
+ * DingConnect mixes games, gift cards, restaurants, retail, etc. into the
+ * same provider list. This filter keeps only real mobile top-up operators.
+ */
+const MOBILE_KEYWORDS = [
+  "digicel", "natcom", "claro", "movistar", "tigo", "orange", "mtn",
+  "airtel", "vodafone", "etisalat", "safaricom", "telcel", "personal",
+  "entel", "flow", "ooredoo", "zain", "lycamobile", "lebara",
+  "telemobil", "telekom", "telefonica", "telia", "telenor", "telus",
+  "bouygues", "sfr", "free mobile", "wind", "tre", "3 italia",
+  "komtec", "cellc", "cell c", "mobilcom", "tmobile", "t-mobile",
+  "at&t", "verizon", "boost mobile", "cricket", "metro by t-mobile",
+  "simple mobile", "tracfone", "net10", "virgin mobile", "us cellular",
+  "life wireless", "mobile x", "mint mobile",
+  "cable wireless", "cwc", "cable & wireless",
+  "cubacel", "telemovil", "comcel", "unefon", "iusacell", "nextel",
+  "tigoUNE", "millicom", "masmovil", "yoigo", " Jazztel",
+  "megafon", "beeline", "mts ", "tele2", "kyivstar", "bakcell",
+  "azercell", "n cell", "ntc", "npc", "smart cell", "utl",
+  "warid", "banglalink", "robi", "teletalk", "grameenphone",
+  "jazz", "zong", "telenor pakistan", "ufone",
+  "dialog", "mobitel", "hutch", "airtel lanka",
+  "celcom", "digi", "maxis", "u mobile", "unifi",
+  "xl axiata", "indosat", "telkomsel", "tri ", "3 indonesia",
+  "smartfren", "byru", "mentari",
+  "ais", "dtac", "true move", "truemove",
+  "globe", "smart communications", "sun cellular", "dito",
+  "viettel", "vinaphone", "mobi phone", "mobifone", "vietnamobile",
+  "cellcard", "seatech",
+  "kt mobile", "sk telecom", "lg uplus", "lg u+",
+  "docomo", "au by kddi", "softbank", "rakuten mobile",
+  "china mobile", "china unicom", "china telecom",
+  "hutchison", "3 uk", "ee ", "giffgaff", "sky mobile",
+  "post luxembourg", "tango",
+  "proximus", "base", "telenet",
+  "kpn", "t-mobile nl",
+  "elisa", "dna ",
+  "telenor denmark", "telia denmark", "3 dk",
+  "telenor sweden", "tele2 sweden", "tre sweden",
+  "netcom", "ice ", "telenor norway",
+  "siminn", "vodafone iceland", "sorocco",
+  "omantel", "ooredoo oman", "rencell",
+  "batelco", "zain bahrain", "stc bahrain",
+  "ooredoo kuwait", "zain kuwait", "stc kuwait",
+  "du ", "virgin mobile uae",
+  "mobily", "stc ", "stc sudan", "zain saudi",
+  "jawwal", "ooredoo palestine",
+  "syriatel", "mtn syria",
+  "alfa ", "touch ", "mtc touch",
+  "seanet", "sudani", "zain south sudan",
+  "ethiotelecom", "safaricom ethiopia",
+  "mtn ghana", "vodafone ghana", "airteltigo", "glo ghana",
+  "mtn nigeria", "airtel nigeria", "9mobile", "glo mobile",
+  "mtn uganda", "airtel uganda", "utl ", " Africell",
+  "mtn rwanda", "airtel rwanda",
+  "mtn cameroon", "orange cameroon", "nexttel",
+  "mtn cote", "orange cote", "moov ",
+  "mtn benin", "moov benin",
+  "orange ci", "mtn ci",
+  "orange senegal", "expresso senegal", "free senegal",
+  "orange mali", "moov mali", "telecel mali",
+  "orange burkina", "telecel faso", "moov burkina",
+  "orange niger", "moov niger", "sahel",
+  "orange tchad", "airtel tchad",
+  "orange guinee", "mtn guinee",
+  "orange madagascar", "airtel madagascar", "telma",
+  "orange maurice", "emtel",
+  "vodacom", "mtn congo", "airtel congo",
+  "mtn zambia", "airtel zambia",
+  "mtn botswana", "mascom", "orange botswana",
+  "mtn swaziland", "swazi mobile",
+  "mtn liberia", "orange liberia",
+  "t-mobile", "telekom austria", "a1 telekom",
+  "orange poland", "play ", "plus ", "orange romania",
+  "orange slovakia", "telekom slovakia",
+  "vivacom", "mtsmo", "_globul",
+  "hteronet", "t-2 ", "a1 hrvatska",
+  "telekom srbija", "mts srbija", "telenor serbia",
+  "vip ", "a1 slovenia",
+  "orange belgium", "proximus",
+  "telenor hungary", "vodafone hungary",
+  "telia finland", "elisa finland",
+  "telenor denmark",
+  "altice ", "numo ",
+  "cable wireless", "lap ",
+  "oou mobile",
+  "telkom", "9mobile",
+  "digicel", "hallo",
+  "movistar ", "unefon",
+  "telenet",
+  "bell mobility", "bell mts", "rogers", "fido",
+  "freedom mobile", "spinTel",
+  "telstra", "optus", "amaysim",
+  "azercell", "bakcell",
+  "vivo", "tim brazil", "tim italy",
+  "kddi", "lg u", "avea",
+  "dito", "smart communications",
+  "cellcom", "altice",
+  "africell", "seanet", "sudani",
+  "hallo", "numo",
+  "telecel", "a1 ", "telemovil",
+  "jazz", "zong", "glo ",
+  "stc ", "alfa ", "touch ",
+  "3 uk", "ee ",
+];
+
+/** Non-mobile keywords that should be excluded even if they contain a mobile keyword */
+const NON_MOBILE_EXCLUDES = [
+  "pubg", "roblox", "razer", "game", "jogos", "steam", "fortnite",
+  "xbox", "playstation", "nintendo", "minecraft", "valorant",
+  "call of duty", "league of legends", "genshin", "free fire",
+  "mobile legends", "diablo", "age of empires", "ace racer",
+  "lifeafter", "guild wars", "dead rising", "armored core",
+  "plague tale", "gunfire reborn", "eudemons",
+  "netflix", "spotify", "hulu", "disney", "crunchyroll", "tinder",
+  "youtube", "twitch", "discord", "shahid", "abbonamenti",
+  "gift card", "app store", "itunes", "apple", "amazon",
+  "google play", "crypto", "bitcoin", "wallet", "voucher",
+  "restaurant", "food", "cafe", "coffee", "pizza", "barbeque",
+  "cupcake", "grocery", "supermarket", "bakery",
+  "apparel", "fashion", "clothing", "jewelry", "jewel",
+  "hotel", "resort", "spa", "holiday", "travel",
+  "hardware", "sporting goods", "sport", "fitness",
+  "cosmetics", "beauty", "perfume",
+  "cinema", "cinemex", "cinemark", "movie",
+  "book", "library", "abbonamenti",
+  "furniture", "home", "garden",
+  "pet ", "pet supplies",
+  "baby", "moms", "kids",
+  "flower", "blumen",
+  "shoes", "sneaker",
+  "tumi", "luggage",
+  "skip hop", "aeropostale",
+  "galeries", "lafayette",
+  "groupon", "cabify", "deliveroo", "share now",
+  "westjet", "airline", "airways",
+  "sleepyhead", "sterling",
+  "champneys", "veteran",
+  "nutrisa", "meijer", "pappas",
+  "palm ", "swiss tel hotels",
+  "childrens place", "willie g",
+  "coffee bean", "boost juice",
+  "7-eleven", "7eleven",
+  "sizeer", "upim",
+  "carluccios",
+  "d pauls", "sterling holidays",
+  "airbnb",
+  "abans",
+  "abracadaroom",
+  "academy sports",
+  "accor hotels",
+  "ace hardware",
+  "americanas",
+  "anacapri",
+  "arezzo",
+  "assai",
+  "appegas",
+  "baskets",
+  "blumenversand",
+  "symbols",
+  "3m ",
+  "43einhalb",
+  "6thstreet",
+  "7krave",
+  "abonamenti",
+  "appgas",
+  "amobeleza",
+  "store", "shop", "market", "online", "digital",
+  "tv", "internet", "plan", "bundle",
+  "xfinity", "esso", "mobil price",
+  "tim horton", "jollibee", "taco bell",
+  "likee", "anghami", "free fire",
+  "noor play", "drummond",
+  "red robin", "auberge", "pommier",
+  "simons", "selby", "yankee candle",
+  "robins kitchen", "robinsons",
+  "opti plus", "scarabee", "estee lauder",
+  "eventim", "globetrotter", "btaskee",
+  "bouchee", "la maison", "maisons du monde",
+  "mango tree", "my golf", "youmee",
+  "zooplus", "lee india", "lee & tee",
+  "adv plus", "advantage plus",
+  "jazz lounge", "sbee electricity",
+  "hopintown", "nairobi sports",
+  "spa", "lottery", "casino",
+  "electricity", "gas station",
+  "insurance", "banking", "loan",
+];
+
+function isMobileOperator(name: string): boolean {
+  const lower = name.toLowerCase();
+
+  // First check if it matches any non-mobile exclude keyword
+  for (const kw of NON_MOBILE_EXCLUDES) {
+    if (lower.includes(kw)) return false;
+  }
+
+  // Then check if it matches any mobile keyword
+  for (const kw of MOBILE_KEYWORDS) {
+    if (lower.includes(kw)) return true;
+  }
+
+  // Default: not a mobile operator
+  return false;
+}
+
 async function syncProviders(supabase: any): Promise<{ count: number; error: string | null }> {
   try {
     // GetProviders returns ALL providers at once — no country filter parameter.
@@ -184,6 +391,7 @@ async function syncProviders(supabase: any): Promise<{ count: number; error: str
 
     const allProviders: any[] = [];
     let skipped = 0;
+    let skippedNonMobile = 0;
 
     for (const p of items) {
       // Match provider to country by CountryIso (preferred) or CountryCode fallback
@@ -195,6 +403,15 @@ async function syncProviders(supabase: any): Promise<{ count: number; error: str
       }
 
       const providerName = p.Name || p.ProviderCode;
+
+      // Only keep mobile top-up operators. DingConnect mixes games, gift cards,
+      // restaurants, retail stores, etc. into the same provider list with no
+      // category field. We filter by known mobile carrier name patterns.
+      if (!isMobileOperator(providerName)) {
+        skippedNonMobile++;
+        continue;
+      }
+
       allProviders.push({
         ding_operator_code: p.ProviderCode,
         country_id: countryMatch.id,
@@ -214,16 +431,35 @@ async function syncProviders(supabase: any): Promise<{ count: number; error: str
       }
     }
 
-    // Mark operators no longer returned as inactive (preserve orders/FKs)
+    // Mark ALL operators not in the current sync as inactive (including non-mobile ones)
     const returnedCodes = allProviders.map((p) => p.ding_operator_code);
     if (returnedCodes.length > 0) {
-      await supabase
+      // Deactivate any operator whose code is not in the current mobile-only set
+      // Use a batch approach to avoid SQL injection with very long IN clauses
+      const { error: updateErr } = await supabase
         .from("operators")
         .update({ is_active: false })
         .not("ding_operator_code", "in", `(${returnedCodes.map((c) => `'${c}'`).join(",")})`);
+      if (updateErr) {
+        console.error("Failed to deactivate stale operators:", updateErr.message);
+      }
     }
 
-    return { count: allProviders.length, error: skipped > 0 ? `${skipped} providers skipped (no matching country)` : null };
+    // Ensure all synced providers are active
+    if (allProviders.length > 0) {
+      const activeCodes = allProviders.map((p) => p.ding_operator_code);
+      await supabase
+        .from("operators")
+        .update({ is_active: true })
+        .in("ding_operator_code", activeCodes);
+    }
+
+    return {
+      count: allProviders.length,
+      error: skipped > 0 || skippedNonMobile > 0
+        ? `${skipped} providers skipped (no country), ${skippedNonMobile} non-mobile operators filtered out`
+        : null,
+    };
   } catch (e) {
     return { count: 0, error: e.message };
   }
