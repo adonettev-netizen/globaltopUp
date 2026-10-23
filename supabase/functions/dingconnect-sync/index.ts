@@ -117,8 +117,14 @@ async function syncCountries(supabase: any): Promise<{ count: number; error: str
     }
 
     const rows = items.map((c) => {
-      // Extract calling code from InternationalDialingInformation array
-      const callingCode = c.InternationalDialingInformation?.[0]?.Prefix || "";
+      // Extract calling code from InternationalDialingInformation array.
+      // DingConnect stores the full dialing prefix (country code + area code)
+      // for NANP countries (e.g. "1201" for US). We need just the country
+      // calling code, so for any 4-digit prefix starting with "1", we use "1".
+      let callingCode = c.InternationalDialingInformation?.[0]?.Prefix || "";
+      if (/^1[0-9]{3}$/.test(callingCode)) {
+        callingCode = "1";
+      }
       return {
         ding_country_code: c.CountryIso,
         name: c.CountryName,

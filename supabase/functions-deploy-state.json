@@ -11,11 +11,11 @@
     },
     "dingconnect-sync": {
       "hasChanged": false,
-      "hash": "45c308d172d1114e3d5ffcb4f022d970717384eb0cc42427457325cc0fbbec49"
+      "hash": "d878eaad78a37ba7b239e324715573367100066e08c09be507b157a340e30c22"
     },
     "lookup-operator": {
       "hasChanged": false,
-      "hash": "cd4864b57ff7fbd0e676031e7040262fdad3f859595a5ba27c0818c663f76662"
+      "hash": "2455b9856b7da09bea8308fb4e5806ab19e822020048099890ccff0992f4d2f3"
     },
     "mercado-pago-webhook": {
       "hasChanged": false,

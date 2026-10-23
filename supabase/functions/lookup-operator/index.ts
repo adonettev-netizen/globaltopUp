@@ -73,73 +73,80 @@ async function lookupOperator(accountNumber: string): Promise<{
 }
 
 /**
- * NANP (North American Numbering Plan) area code ranges.
+ * NANP (North American Numbering Plan) area code mapping.
  * All these countries share calling code +1, so we disambiguate by
- * the 3-digit area code (the first 3 digits of the national number).
+ * the 3-digit area code (NPA).
+ *
+ * Rather than listing every US area code (there are 300+), we list the
+ * area codes belonging to OTHER NANP countries. Any area code not in
+ * this map defaults to the United States.
  *
  * Source: https://en.wikipedia.org/wiki/List_of_North_American_Numbering_Plan_area_codes
  */
-const NANP_AREA_CODE_RANGES: { iso: string; ranges: [number, number][] }[] = [
-  { iso: "US", ranges: [
-    [201, 289], [290, 299], [300, 389], [400, 489], [500, 589],
-    [600, 689], [700, 789], [800, 879], [881, 889], [900, 999],
-  ]},
-  // Jamaica: 658, 876
-  { iso: "JM", ranges: [[658, 658], [876, 876]] },
-  // Canada: specific area codes
-  { iso: "CA", ranges: [
-    [204, 204], [226, 226], [236, 236], [249, 249], [250, 250],
-    [263, 263], [289, 289], [306, 306], [343, 343], [354, 354],
-    [365, 365], [367, 367], [368, 368], [403, 403], [416, 416],
-    [418, 418], [428, 428], [431, 431], [437, 437], [438, 438],
-    [450, 450], [468, 468], [474, 474], [506, 506], [514, 514],
-    [519, 519], [548, 548], [579, 579], [581, 581], [584, 584],
-    [587, 587], [604, 604], [613, 613], [639, 639], [647, 647],
-    [672, 672], [682, 682], [705, 705], [709, 709], [742, 742],
-    [753, 753], [778, 778], [780, 780], [782, 782], [807, 807],
-    [819, 819], [825, 825], [867, 867], [873, 873], [879, 879],
-    [902, 902], [905, 905], [939, 939],
-  ]},
-  // Dominican Republic: 809, 829, 849
-  { iso: "DO", ranges: [[809, 809], [829, 829], [849, 849]] },
-  // Puerto Rico: 787, 939
-  { iso: "PR", ranges: [[787, 787], [939, 939]] },
-  // Trinidad & Tobago: 868
-  { iso: "TT", ranges: [[868, 868]] },
-  // Barbados: 246
-  { iso: "BB", ranges: [[246, 246]] },
-  // Bahamas: 242
-  { iso: "BS", ranges: [[242, 242]] },
-  // Grenada: 473
-  { iso: "GD", ranges: [[473, 473]] },
-  // Jamaica already above
-  // Antigua: 268
-  { iso: "AG", ranges: [[268, 268]] },
-  // Dominica: 767
-  { iso: "DM", ranges: [[767, 767]] },
-  // St. Lucia: 758
-  { iso: "LC", ranges: [[758, 758]] },
-  // St. Vincent: 784
-  { iso: "VC", ranges: [[784, 784]] },
-  // St. Kitts: 869
-  { iso: "KN", ranges: [[869, 869]] },
-  // Cayman Islands: 345
-  { iso: "KY", ranges: [[345, 345]] },
-  // Bermuda: 441
-  { iso: "BM", ranges: [[441, 441]] },
-  // Guyana: 592
-  { iso: "GY", ranges: [[592, 592]] },
-  // Suriname: 597
-  { iso: "SR", ranges: [[597, 597]] },
-];
+const NANP_NON_US_AREA_CODES: Record<number, string> = {
+  // Canada
+  204: "CA", 226: "CA", 236: "CA", 249: "CA", 250: "CA", 263: "CA",
+  289: "CA", 306: "CA", 343: "CA", 354: "CA", 365: "CA", 367: "CA",
+  368: "CA", 403: "CA", 416: "CA", 418: "CA", 428: "CA", 431: "CA",
+  437: "CA", 438: "CA", 450: "CA", 468: "CA", 474: "CA", 506: "CA",
+  514: "CA", 519: "CA", 548: "CA", 579: "CA", 581: "CA", 584: "CA",
+  587: "CA", 604: "CA", 613: "CA", 639: "CA", 647: "CA", 672: "CA",
+  682: "CA", 705: "CA", 709: "CA", 742: "CA", 753: "CA", 778: "CA",
+  780: "CA", 782: "CA", 807: "CA", 819: "CA", 825: "CA", 867: "CA",
+  873: "CA", 879: "CA", 902: "CA", 905: "CA",
+  // Jamaica
+  658: "JM", 876: "JM",
+  // Dominican Republic
+  809: "DO", 829: "DO", 849: "DO",
+  // Puerto Rico
+  787: "PR", 939: "PR",
+  // Trinidad & Tobago
+  868: "TT",
+  // Barbados
+  246: "BB",
+  // Bahamas
+  242: "BS",
+  // Grenada
+  473: "GD",
+  // Antigua & Barbuda
+  268: "AG",
+  // Dominica
+  767: "DM",
+  // St. Lucia
+  758: "LC",
+  // St. Vincent & Grenadines
+  784: "VC",
+  // St. Kitts & Nevis
+  869: "KN",
+  // Cayman Islands
+  345: "KY",
+  // Bermuda
+  441: "BM",
+  // Guyana
+  592: "GY",
+  // Suriname
+  597: "SR",
+  // Anguilla
+  264: "AI",
+  // British Virgin Islands
+  284: "VG",
+  // Turks & Caicos
+  649: "TC",
+  // Montserrat
+  664: "MS",
+  // Sint Maarten
+  721: "SX",
+  // US Virgin Islands (these are US territory but have separate area code)
+  340: "US",
+  // American Samoa
+  684: "US",
+  // Guam / Northern Mariana
+  671: "US", 670: "US",
+};
 
-function resolveNanpCountry(areaCode: number): string | null {
-  for (const entry of NANP_AREA_CODE_RANGES) {
-    for (const [lo, hi] of entry.ranges) {
-      if (areaCode >= lo && areaCode <= hi) return entry.iso;
-    }
-  }
-  return null;
+function resolveNanpCountry(areaCode: number): string {
+  const iso = NANP_NON_US_AREA_CODES[areaCode];
+  return iso || "US";
 }
 
 Deno.serve(async (req: Request) => {
@@ -232,11 +239,8 @@ Deno.serve(async (req: Request) => {
         const areaCode = parseInt(nationalNumber.slice(0, 3), 10);
         if (!isNaN(areaCode)) {
           const nanpIso = resolveNanpCountry(areaCode);
-          if (nanpIso && countryByIso[nanpIso] && countryByIso[nanpIso].id !== matchedCountry.id) {
+          if (nanpIso && countryByIso[nanpIso]) {
             matchedCountry = countryByIso[nanpIso];
-            detectionSource = "nanp_area_code";
-          } else if (nanpIso && countryByIso[nanpIso]) {
-            // Already the right country, just confirm
             detectionSource = "nanp_area_code";
           }
         }
